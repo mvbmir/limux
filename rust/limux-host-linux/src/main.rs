@@ -7,6 +7,7 @@ mod window;
 use adw::prelude::*;
 use libadwaita as adw;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 const APP_ID: &str = "dev.limux.linux";
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -98,14 +99,22 @@ fn main() {
         .flags(adw::gio::ApplicationFlags::NON_UNIQUE)
         .build();
 
-    app.connect_activate(window::build_window);
+    let shortcuts = Rc::new(shortcut_config::load_shortcuts());
+    for warning in &shortcuts.warnings {
+        eprintln!("limux: {warning}");
+    }
 
-    // Global keyboard shortcuts
-    app.set_accels_for_action("win.new-workspace", &["<Ctrl><Shift>n"]);
-    app.set_accels_for_action("win.close-workspace", &["<Ctrl><Shift>w"]);
-    app.set_accels_for_action("win.toggle-sidebar", &["<Ctrl>b"]);
-    app.set_accels_for_action("win.next-workspace", &["<Ctrl>Page_Down"]);
-    app.set_accels_for_action("win.prev-workspace", &["<Ctrl>Page_Up"]);
+    {
+        let shortcuts = shortcuts.clone();
+        app.connect_activate(move |app| {
+            window::build_window(app, shortcuts.clone());
+        });
+    }
+
+    for (action_name, accels) in shortcuts.gtk_accel_entries() {
+        let accel_refs: Vec<&str> = accels.iter().map(String::as_str).collect();
+        app.set_accels_for_action(action_name, &accel_refs);
+    }
 
     app.run();
 }

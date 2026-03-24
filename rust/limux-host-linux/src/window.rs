@@ -11,6 +11,7 @@ use crate::layout_state::{
     WorkspaceState,
 };
 use crate::pane::{self, PaneCallbacks};
+use crate::shortcut_config::{self, ResolvedShortcutConfig, ShortcutCommand};
 
 // ---------------------------------------------------------------------------
 // State
@@ -47,6 +48,7 @@ struct Workspace {
 struct AppState {
     workspaces: Vec<Workspace>,
     active_idx: usize,
+    shortcuts: Rc<ResolvedShortcutConfig>,
     stack: gtk::Stack,
     sidebar_list: gtk::ListBox,
     paned: gtk::Paned,
@@ -527,7 +529,7 @@ row:selected .limux-ws-path {
 // Window construction
 // ---------------------------------------------------------------------------
 
-pub fn build_window(app: &adw::Application) {
+pub fn build_window(app: &adw::Application, shortcuts: Rc<ResolvedShortcutConfig>) {
     // Load CSS
     let provider = gtk::CssProvider::new();
     let all_css = format!("{CSS}\n{}", pane::PANE_CSS);
@@ -699,6 +701,7 @@ pub fn build_window(app: &adw::Application) {
     let state: State = Rc::new(RefCell::new(AppState {
         workspaces: Vec::new(),
         active_idx: 0,
+        shortcuts,
         stack: stack.clone(),
         sidebar_list: sidebar_list.clone(),
         paned: main_paned.clone(),
@@ -825,25 +828,29 @@ pub fn build_window(app: &adw::Application) {
 // ---------------------------------------------------------------------------
 
 fn register_actions(window: &adw::ApplicationWindow, state: &State) {
-    let action_defs: &[&str] = &[
-        "new-workspace",
-        "close-workspace",
-        "toggle-sidebar",
-        "next-workspace",
-        "prev-workspace",
-    ];
+    let action_defs: Vec<(&'static str, ShortcutCommand)> = {
+        let s = state.borrow();
+        s.shortcuts
+            .shortcuts
+            .iter()
+            .map(|shortcut| {
+                (
+                    shortcut
+                        .definition
+                        .action_name
+                        .strip_prefix("win.")
+                        .unwrap_or(shortcut.definition.action_name),
+                    shortcut.definition.command,
+                )
+            })
+            .collect()
+    };
 
-    for name in action_defs {
+    for (name, command) in action_defs {
         let action = gtk::gio::SimpleAction::new(name, None);
         let state = state.clone();
-        let handler_name = name.to_string();
-        action.connect_activate(move |_, _| match handler_name.as_str() {
-            "new-workspace" => add_workspace(&state, None),
-            "close-workspace" => close_workspace(&state),
-            "toggle-sidebar" => toggle_sidebar(&state),
-            "next-workspace" => cycle_workspace(&state, 1),
-            "prev-workspace" => cycle_workspace(&state, -1),
-            _ => {}
+        action.connect_activate(move |_, _| {
+            dispatch_shortcut_command(&state, command);
         });
         window.add_action(&action);
     }
@@ -851,134 +858,22 @@ fn register_actions(window: &adw::ApplicationWindow, state: &State) {
 
 /// Intercept keyboard shortcuts in the CAPTURE phase for window-level bindings.
 fn install_key_capture(window: &adw::ApplicationWindow, state: &State) {
-    use gtk::gdk;
-
     let key_controller = gtk::EventControllerKey::new();
     key_controller.set_propagation_phase(gtk::PropagationPhase::Capture);
 
     let state = state.clone();
     key_controller.connect_key_pressed(move |_, keyval, _keycode, modifier| {
-        let ctrl = modifier.contains(gdk::ModifierType::CONTROL_MASK);
-        let shift = modifier.contains(gdk::ModifierType::SHIFT_MASK);
-
-        let matched = match (ctrl, shift, keyval) {
-            // Ctrl+Shift+N → new workspace
-            (true, true, gdk::Key::N | gdk::Key::n) => {
-                add_workspace(&state, None);
+        let matched = shortcut_config::NormalizedShortcut::from_gdk_key(keyval, modifier)
+            .map(|shortcut| shortcut.to_runtime_combo())
+            .and_then(|combo| {
+                let s = state.borrow();
+                s.shortcuts.command_for_runtime_combo(&combo)
+            })
+            .map(|command| {
+                dispatch_shortcut_command(&state, command);
                 true
-            }
-            // Ctrl+Shift+W → close workspace
-            (true, true, gdk::Key::W | gdk::Key::w) => {
-                close_workspace(&state);
-                true
-            }
-            // Ctrl+Shift+Left → prev tab
-            (true, true, gdk::Key::Left) => {
-                cycle_focused_pane_tab(&state, -1);
-                true
-            }
-            // Ctrl+Shift+Right → next tab
-            (true, true, gdk::Key::Right) => {
-                cycle_focused_pane_tab(&state, 1);
-                true
-            }
-            // Ctrl+Shift+D → split down
-            (true, true, gdk::Key::D | gdk::Key::d) => {
-                split_focused_pane(&state, gtk::Orientation::Vertical);
-                true
-            }
-            // Ctrl+Shift+T → new terminal tab in focused pane
-            (true, true, gdk::Key::T | gdk::Key::t) => {
-                add_tab_to_focused_pane(&state, false);
-                true
-            }
-            // Ctrl+D → split right
-            (true, false, gdk::Key::d) => {
-                split_focused_pane(&state, gtk::Orientation::Horizontal);
-                true
-            }
-            // Ctrl+W → close focused tab/pane
-            (true, false, gdk::Key::w) => {
-                close_focused_tab(&state);
-                true
-            }
-            // Ctrl+B → toggle sidebar
-            (true, false, gdk::Key::b) => {
-                toggle_sidebar(&state);
-                true
-            }
-            // Ctrl+T → new terminal tab
-            (true, false, gdk::Key::t) => {
-                add_tab_to_focused_pane(&state, false);
-                true
-            }
-            // Ctrl+PageDown → next workspace
-            (true, false, gdk::Key::Page_Down) => {
-                cycle_workspace(&state, 1);
-                true
-            }
-            // Ctrl+PageUp → prev workspace
-            (true, false, gdk::Key::Page_Up) => {
-                cycle_workspace(&state, -1);
-                true
-            }
-            // Ctrl+Arrow → focus pane in direction
-            (true, false, gdk::Key::Left) => {
-                focus_pane_in_direction(&state, Direction::Left);
-                true
-            }
-            (true, false, gdk::Key::Right) => {
-                focus_pane_in_direction(&state, Direction::Right);
-                true
-            }
-            (true, false, gdk::Key::Up) => {
-                focus_pane_in_direction(&state, Direction::Up);
-                true
-            }
-            (true, false, gdk::Key::Down) => {
-                focus_pane_in_direction(&state, Direction::Down);
-                true
-            }
-            // Ctrl+1-9 → switch to workspace by index
-            (true, false, key) => {
-                let digit = match key {
-                    gdk::Key::_1 => Some(0usize),
-                    gdk::Key::_2 => Some(1),
-                    gdk::Key::_3 => Some(2),
-                    gdk::Key::_4 => Some(3),
-                    gdk::Key::_5 => Some(4),
-                    gdk::Key::_6 => Some(5),
-                    gdk::Key::_7 => Some(6),
-                    gdk::Key::_8 => Some(7),
-                    gdk::Key::_9 => {
-                        // Ctrl+9 always goes to last workspace
-                        let s = state.borrow();
-                        if s.workspaces.is_empty() {
-                            None
-                        } else {
-                            Some(s.workspaces.len() - 1)
-                        }
-                    }
-                    _ => None,
-                };
-                if let Some(idx) = digit {
-                    let row_and_list = {
-                        let s = state.borrow();
-                        s.workspaces
-                            .get(idx)
-                            .map(|ws| (ws.sidebar_row.clone(), s.sidebar_list.clone()))
-                    };
-                    switch_workspace(&state, idx);
-                    if let Some((row, list)) = row_and_list {
-                        list.select_row(Some(&row));
-                    }
-                    true
-                } else {
-                    false
-                }
-            }
-            _ => false,
-        };
+            })
+            .unwrap_or(false);
 
         if matched {
             glib::Propagation::Stop
@@ -988,6 +883,60 @@ fn install_key_capture(window: &adw::ApplicationWindow, state: &State) {
     });
 
     window.add_controller(key_controller);
+}
+
+fn dispatch_shortcut_command(state: &State, command: ShortcutCommand) {
+    match command {
+        ShortcutCommand::NewWorkspace => add_workspace(state, None),
+        ShortcutCommand::CloseWorkspace => close_workspace(state),
+        ShortcutCommand::ToggleSidebar => toggle_sidebar(state),
+        ShortcutCommand::NextWorkspace => cycle_workspace(state, 1),
+        ShortcutCommand::PrevWorkspace => cycle_workspace(state, -1),
+        ShortcutCommand::CycleTabPrev => cycle_focused_pane_tab(state, -1),
+        ShortcutCommand::CycleTabNext => cycle_focused_pane_tab(state, 1),
+        ShortcutCommand::SplitDown => split_focused_pane(state, gtk::Orientation::Vertical),
+        ShortcutCommand::NewTerminal => add_tab_to_focused_pane(state, false),
+        ShortcutCommand::SplitRight => split_focused_pane(state, gtk::Orientation::Horizontal),
+        ShortcutCommand::CloseFocusedPane => close_focused_tab(state),
+        ShortcutCommand::FocusLeft => focus_pane_in_direction(state, Direction::Left),
+        ShortcutCommand::FocusRight => focus_pane_in_direction(state, Direction::Right),
+        ShortcutCommand::FocusUp => focus_pane_in_direction(state, Direction::Up),
+        ShortcutCommand::FocusDown => focus_pane_in_direction(state, Direction::Down),
+        ShortcutCommand::ActivateWorkspace1 => activate_workspace_shortcut(state, 0),
+        ShortcutCommand::ActivateWorkspace2 => activate_workspace_shortcut(state, 1),
+        ShortcutCommand::ActivateWorkspace3 => activate_workspace_shortcut(state, 2),
+        ShortcutCommand::ActivateWorkspace4 => activate_workspace_shortcut(state, 3),
+        ShortcutCommand::ActivateWorkspace5 => activate_workspace_shortcut(state, 4),
+        ShortcutCommand::ActivateWorkspace6 => activate_workspace_shortcut(state, 5),
+        ShortcutCommand::ActivateWorkspace7 => activate_workspace_shortcut(state, 6),
+        ShortcutCommand::ActivateWorkspace8 => activate_workspace_shortcut(state, 7),
+        ShortcutCommand::ActivateLastWorkspace => activate_last_workspace_shortcut(state),
+    }
+}
+
+fn activate_workspace_shortcut(state: &State, idx: usize) {
+    let row_and_list = {
+        let s = state.borrow();
+        s.workspaces
+            .get(idx)
+            .map(|ws| (idx, ws.sidebar_row.clone(), s.sidebar_list.clone()))
+    };
+
+    if let Some((idx, row, list)) = row_and_list {
+        switch_workspace(state, idx);
+        list.select_row(Some(&row));
+    }
+}
+
+fn activate_last_workspace_shortcut(state: &State) {
+    let last_idx = {
+        let s = state.borrow();
+        if s.workspaces.is_empty() {
+            return;
+        }
+        s.workspaces.len() - 1
+    };
+    activate_workspace_shortcut(state, last_idx);
 }
 
 // ---------------------------------------------------------------------------
