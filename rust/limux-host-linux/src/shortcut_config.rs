@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use gtk4::gdk;
 use serde::Deserialize;
 
 pub const CONFIG_DIR_NAME: &str = "limux";
@@ -109,7 +110,6 @@ pub enum ShortcutConfigError {
         accel: String,
     },
     InvalidJson(String),
-    Io(String),
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -347,6 +347,23 @@ const SHORTCUT_DEFINITIONS: [ShortcutDefinition; 25] = [
 ];
 
 impl NormalizedShortcut {
+    pub fn from_gdk_key(keyval: gdk::Key, modifier: gdk::ModifierType) -> Option<Self> {
+        let key_name = keyval.name()?;
+        let key = normalize_runtime_key(key_name.as_str());
+        if is_modifier_only_key(&key) {
+            return None;
+        }
+
+        Some(Self {
+            key,
+            ctrl: modifier.contains(gdk::ModifierType::CONTROL_MASK),
+            shift: modifier.contains(gdk::ModifierType::SHIFT_MASK),
+            alt: modifier.contains(gdk::ModifierType::ALT_MASK),
+            meta: modifier.contains(gdk::ModifierType::META_MASK),
+            super_key: modifier.contains(gdk::ModifierType::SUPER_MASK),
+        })
+    }
+
     pub fn parse(input: &str) -> Result<Self, ShortcutConfigError> {
         let trimmed = input.trim();
         if trimmed.is_empty() {
@@ -461,6 +478,22 @@ impl ResolvedShortcut {
 }
 
 impl ResolvedShortcutConfig {
+    pub fn gtk_accel_entries(&self) -> Vec<(&'static str, Vec<String>)> {
+        self.shortcuts
+            .iter()
+            .filter(|shortcut| shortcut.definition.registers_gtk_accel)
+            .map(|shortcut| {
+                let accels = shortcut.gtk_accel().into_iter().collect();
+                (shortcut.definition.action_name, accels)
+            })
+            .collect()
+    }
+
+    pub fn command_for_runtime_combo(&self, combo: &str) -> Option<ShortcutCommand> {
+        self.find_by_runtime_combo(combo)
+            .map(|shortcut| shortcut.definition.command)
+    }
+
     pub fn find_by_id(&self, id: ShortcutId) -> Option<&ResolvedShortcut> {
         self.shortcuts
             .iter()
@@ -634,6 +667,22 @@ fn normalize_runtime_key(key: &str) -> String {
     }
 }
 
+fn is_modifier_only_key(key: &str) -> bool {
+    matches!(
+        key,
+        "shift_l"
+            | "shift_r"
+            | "control_l"
+            | "control_r"
+            | "alt_l"
+            | "alt_r"
+            | "meta_l"
+            | "meta_r"
+            | "super_l"
+            | "super_r"
+    )
+}
+
 fn runtime_key_to_gtk_key(key: &str) -> String {
     match key {
         "page_up" => "Page_Up".to_string(),
@@ -795,5 +844,45 @@ mod tests {
         let resolved = load_shortcuts_or_default(&path);
         assert!(resolved.warnings.is_empty());
         assert_eq!(resolved.shortcuts.len(), definitions().len());
+    }
+
+    #[test]
+    fn resolved_shortcuts_expose_registered_gtk_accels_and_clear_unbound_actions() {
+        let resolved = resolve_shortcuts_from_str(
+            r#"{
+                "shortcuts": {
+                    "toggle_sidebar": null
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let gtk_accels = resolved.gtk_accel_entries();
+        assert_eq!(gtk_accels.len(), 5);
+        assert_eq!(
+            gtk_accels
+                .iter()
+                .find(|(action, _)| *action == "win.toggle-sidebar")
+                .map(|(_, accels)| accels.clone()),
+            Some(Vec::<String>::new())
+        );
+    }
+
+    #[test]
+    fn resolved_shortcuts_route_runtime_combos_to_canonical_commands() {
+        let resolved = default_shortcuts();
+
+        assert_eq!(
+            resolved.command_for_runtime_combo("ctrl+t"),
+            Some(ShortcutCommand::NewTerminal)
+        );
+        assert_eq!(
+            resolved.command_for_runtime_combo("ctrl+shift+t"),
+            Some(ShortcutCommand::NewTerminal)
+        );
+        assert_eq!(
+            resolved.command_for_runtime_combo("ctrl+9"),
+            Some(ShortcutCommand::ActivateLastWorkspace)
+        );
     }
 }
