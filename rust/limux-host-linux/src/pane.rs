@@ -191,7 +191,11 @@ pub fn create_pane(
 
     let new_term_btn = icon_button(
         "utilities-terminal-symbolic",
-        &pane_action_tooltip(&shortcuts, "New terminal tab", Some(ShortcutId::NewTerminal)),
+        &pane_action_tooltip(
+            &shortcuts,
+            "New terminal tab",
+            Some(ShortcutId::NewTerminal),
+        ),
     );
     let new_browser_btn = icon_button(
         "limux-globe-symbolic",
@@ -207,11 +211,7 @@ pub fn create_pane(
     );
     let close_btn = icon_button(
         "window-close-symbolic",
-        &pane_action_tooltip(
-            &shortcuts,
-            "Close pane",
-            Some(ShortcutId::CloseFocusedPane),
-        ),
+        &pane_action_tooltip(&shortcuts, "Close pane", Some(ShortcutId::CloseFocusedPane)),
     );
 
     actions.append(&new_term_btn);

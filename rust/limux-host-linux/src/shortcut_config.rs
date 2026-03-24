@@ -100,10 +100,19 @@ pub struct ResolvedShortcutConfig {
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum ShortcutConfigError {
-    InvalidBindingFormat { input: String },
-    MissingKey { input: String },
-    UnknownModifier { input: String, modifier: String },
-    InvalidBindingType { shortcut_id: String },
+    InvalidBindingFormat {
+        input: String,
+    },
+    MissingKey {
+        input: String,
+    },
+    UnknownModifier {
+        input: String,
+        modifier: String,
+    },
+    InvalidBindingType {
+        shortcut_id: String,
+    },
     DuplicateBinding {
         first: ShortcutId,
         second: ShortcutId,
@@ -494,7 +503,9 @@ impl ResolvedShortcut {
     }
 
     pub fn runtime_combo(&self) -> Option<String> {
-        self.binding.as_ref().map(NormalizedShortcut::to_runtime_combo)
+        self.binding
+            .as_ref()
+            .map(NormalizedShortcut::to_runtime_combo)
     }
 }
 
@@ -568,7 +579,9 @@ pub fn default_shortcuts() -> ResolvedShortcutConfig {
     }
 }
 
-pub fn resolve_shortcuts_from_str(raw: &str) -> Result<ResolvedShortcutConfig, ShortcutConfigError> {
+pub fn resolve_shortcuts_from_str(
+    raw: &str,
+) -> Result<ResolvedShortcutConfig, ShortcutConfigError> {
     let parsed: ShortcutConfigFile = serde_json::from_str(raw)
         .map_err(|err| ShortcutConfigError::InvalidJson(err.to_string()))?;
     resolve_shortcuts_from_file(parsed)
@@ -776,7 +789,9 @@ mod tests {
         for def in defs {
             assert!(ids.insert(def.id, def.config_key).is_none());
             assert!(actions.insert(def.action_name, def.config_key).is_none());
-            assert!(accel_keys.insert(def.config_key, def.default_accel).is_none());
+            assert!(accel_keys
+                .insert(def.config_key, def.default_accel)
+                .is_none());
         }
     }
 

@@ -284,25 +284,30 @@ fn snapshot_layout_node(widget: &gtk::Widget, working_directory: Option<&str>) -
 
 fn build_workspace_root(
     state: &State,
+    shortcuts: &Rc<ResolvedShortcutConfig>,
     ws_id: &str,
     working_directory: Option<&str>,
     layout: Option<&LayoutNodeState>,
 ) -> gtk::Widget {
     match layout {
-        Some(layout) => build_layout_widget(state, ws_id, working_directory, layout),
-        None => create_pane_for_workspace(state, ws_id, working_directory, None).upcast(),
+        Some(layout) => build_layout_widget(state, shortcuts, ws_id, working_directory, layout),
+        None => {
+            create_pane_for_workspace(state, shortcuts, ws_id, working_directory, None).upcast()
+        }
     }
 }
 
 fn build_layout_widget(
     state: &State,
+    shortcuts: &Rc<ResolvedShortcutConfig>,
     ws_id: &str,
     working_directory: Option<&str>,
     layout: &LayoutNodeState,
 ) -> gtk::Widget {
     match layout {
         LayoutNodeState::Pane(pane_state) => {
-            create_pane_for_workspace(state, ws_id, working_directory, Some(pane_state)).upcast()
+            create_pane_for_workspace(state, shortcuts, ws_id, working_directory, Some(pane_state))
+                .upcast()
         }
         LayoutNodeState::Split(split_state) => {
             let orientation = match split_state.orientation {
@@ -316,8 +321,15 @@ fn build_layout_widget(
                 .build();
             update_split_ratio_state(&paned, split_state.ratio);
             attach_split_position_persistence(state, &paned);
-            let start = build_layout_widget(state, ws_id, working_directory, &split_state.start);
-            let end = build_layout_widget(state, ws_id, working_directory, &split_state.end);
+            let start = build_layout_widget(
+                state,
+                shortcuts,
+                ws_id,
+                working_directory,
+                &split_state.start,
+            );
+            let end =
+                build_layout_widget(state, shortcuts, ws_id, working_directory, &split_state.end);
             paned.set_start_child(Some(&start));
             paned.set_end_child(Some(&end));
             apply_split_ratio_after_layout(&paned, orientation, split_state.ratio);
@@ -867,11 +879,11 @@ fn install_key_capture(window: &adw::ApplicationWindow, state: &State) {
             let s = state.borrow();
             shortcut_command_from_key_event(&s.shortcuts, keyval, modifier)
         }
-            .map(|command| {
-                dispatch_shortcut_command(&state, command);
-                true
-            })
-            .unwrap_or(false);
+        .map(|command| {
+            dispatch_shortcut_command(&state, command);
+            true
+        })
+        .unwrap_or(false);
 
         if matched {
             glib::Propagation::Stop
@@ -1583,6 +1595,10 @@ fn create_workspace_with_folder(state: &State, name: &str, folder_path: &str) {
 }
 
 fn add_workspace_from_state(state: &State, workspace: &WorkspaceState) {
+    let shortcuts = {
+        let s = state.borrow();
+        s.shortcuts.clone()
+    };
     let mut s = state.borrow_mut();
     let id = uuid::Uuid::new_v4().to_string();
     let stack_name = format!("ws-{id}");
@@ -1590,7 +1606,7 @@ fn add_workspace_from_state(state: &State, workspace: &WorkspaceState) {
         .folder_path
         .as_deref()
         .or(workspace.cwd.as_deref());
-    let root = build_workspace_root(state, &id, working_dir, Some(&workspace.layout));
+    let root = build_workspace_root(state, &shortcuts, &id, working_dir, Some(&workspace.layout));
 
     s.stack.add_named(&root, Some(&stack_name));
 
@@ -1634,14 +1650,11 @@ fn add_workspace_from_state(state: &State, workspace: &WorkspaceState) {
 /// Create a PaneWidget wired up with callbacks for a specific workspace.
 fn create_pane_for_workspace(
     state: &State,
+    shortcuts: &Rc<ResolvedShortcutConfig>,
     ws_id: &str,
     working_directory: Option<&str>,
     initial_state: Option<&PaneState>,
 ) -> gtk::Box {
-    let shortcuts = {
-        let s = state.borrow();
-        s.shortcuts.clone()
-    };
     let state_for_split = state.clone();
     let state_for_close = state.clone();
     let state_for_bell = state.clone();
@@ -1688,7 +1701,12 @@ fn create_pane_for_workspace(
         }),
     });
 
-    pane::create_pane(callbacks, shortcuts, working_directory, initial_state)
+    pane::create_pane(
+        callbacks,
+        shortcuts.clone(),
+        working_directory,
+        initial_state,
+    )
 }
 
 fn close_workspace(state: &State) {
@@ -1898,14 +1916,17 @@ fn split_pane(
     orientation: gtk::Orientation,
 ) {
     // Use the workspace's folder_path (or current cwd) for the new pane
-    let wd = {
+    let (shortcuts, wd) = {
         let s = state.borrow();
-        s.workspaces
-            .iter()
-            .find(|w| w.id == ws_id)
-            .and_then(|ws| ws.folder_path.clone().or_else(|| ws.cwd.borrow().clone()))
+        (
+            s.shortcuts.clone(),
+            s.workspaces
+                .iter()
+                .find(|w| w.id == ws_id)
+                .and_then(|ws| ws.folder_path.clone().or_else(|| ws.cwd.borrow().clone())),
+        )
     };
-    let new_pane = create_pane_for_workspace(state, ws_id, wd.as_deref(), None);
+    let new_pane = create_pane_for_workspace(state, &shortcuts, ws_id, wd.as_deref(), None);
 
     let parent = pane_widget.parent();
 
@@ -2231,12 +2252,12 @@ fn mark_workspace_unread(state: &State, ws_id: &str) {
 
 #[cfg(test)]
 mod tests {
+    use super::gtk::gdk;
     use super::{
         clamp_workspace_insert_index_for_pinning, favorites_prefix_len,
         shortcut_command_from_key_event, sidebar_toggle_tooltip,
     };
     use crate::shortcut_config::{default_shortcuts, resolve_shortcuts_from_str, ShortcutCommand};
-    use super::gtk::gdk;
 
     #[test]
     fn favorites_prefix_len_counts_only_leading_favorites() {
@@ -2338,8 +2359,14 @@ mod tests {
     #[test]
     fn sidebar_toggle_tooltip_reflects_remaps_and_unbinds() {
         let defaults = default_shortcuts();
-        assert_eq!(sidebar_toggle_tooltip(&defaults, true), "Hide sidebar (Ctrl+B)");
-        assert_eq!(sidebar_toggle_tooltip(&defaults, false), "Show sidebar (Ctrl+B)");
+        assert_eq!(
+            sidebar_toggle_tooltip(&defaults, true),
+            "Hide sidebar (Ctrl+B)"
+        );
+        assert_eq!(
+            sidebar_toggle_tooltip(&defaults, false),
+            "Show sidebar (Ctrl+B)"
+        );
 
         let remapped = resolve_shortcuts_from_str(
             r#"{
