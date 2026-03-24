@@ -1,5 +1,6 @@
 mod layout_state;
 mod pane;
+mod shortcut_config;
 mod terminal;
 mod window;
 

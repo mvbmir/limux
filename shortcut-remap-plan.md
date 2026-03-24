@@ -42,9 +42,9 @@ T1 ── T2 ── T3 ── T4 ──┬── T5 ── T6
 - **location**: `rust/limux-host-linux/src/shortcut_config.rs` (new), `rust/limux-host-linux/src/window.rs`, `rust/limux-host-linux/src/main.rs`, `rust/limux-host-linux/src/pane.rs`
 - **description**: Create the first-class host shortcut definition layer. Each definition should capture stable shortcut ID, default binding, runtime owner, whether it registers a GTK accelerator, the dispatch target used by capture-phase routing, and the human-readable label/tooltip name. This is the canonical registry that both `register_actions()` and `install_key_capture()` will consume. The layer should also decide which actions remain direct helper dispatches and which are backed by `gio::SimpleAction`.
 - **validation**: There is one authoritative metadata table for host shortcuts, and every current shortcut from T1 maps to exactly one runtime dispatch target and one visibility policy.
-- **status**: Not Completed
-- **log**:
-- **files edited/created**:
+- **status**: Completed
+- **log**: Added `rust/limux-host-linux/src/shortcut_config.rs` as the single host-owned metadata source for current shortcuts, with stable IDs, action names, default accelerators, labels, GTK-registration policy, and runtime command targets. Captured the current dual-tab-opening behavior as two distinct shortcut IDs that intentionally share the `NewTerminal` command target, which preserves current behavior while keeping binding uniqueness. RED phase: `cargo test -p limux-host-linux shortcut_config::tests -- --nocapture` failed with zero definitions and a missing GTK subset. GREEN phase: the same command passed after filling the 25-definition table and uniqueness/GTK-subset invariants.
+- **files edited/created**: `rust/limux-host-linux/src/main.rs`, `rust/limux-host-linux/src/shortcut_config.rs`
 
 ### T3: Implement Config Schema, Path Resolution, and Validation Rules
 - **depends_on**: [T2]
