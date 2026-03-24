@@ -11,7 +11,7 @@ use crate::layout_state::{
     WorkspaceState,
 };
 use crate::pane::{self, PaneCallbacks};
-use crate::shortcut_config::{self, ResolvedShortcutConfig, ShortcutCommand};
+use crate::shortcut_config::{self, ResolvedShortcutConfig, ShortcutCommand, ShortcutId};
 
 // ---------------------------------------------------------------------------
 // State
@@ -622,7 +622,7 @@ pub fn build_window(app: &adw::Application, shortcuts: Rc<ResolvedShortcutConfig
     let collapse_btn = gtk::Button::with_label("\u{00AB}"); // «
     collapse_btn.add_css_class("flat");
     collapse_btn.add_css_class("limux-sidebar-collapse");
-    collapse_btn.set_tooltip_text(Some("Hide sidebar (Ctrl+B)"));
+    collapse_btn.set_tooltip_text(Some(&sidebar_toggle_tooltip(&shortcuts, true)));
 
     let sidebar_title = gtk::Box::builder()
         .orientation(gtk::Orientation::Horizontal)
@@ -682,7 +682,7 @@ pub fn build_window(app: &adw::Application, shortcuts: Rc<ResolvedShortcutConfig
     // Expand tab — small button on the left edge when sidebar is hidden
     let expand_btn = gtk::Button::with_label("\u{00BB}"); // »
     expand_btn.add_css_class("limux-sidebar-expand");
-    expand_btn.set_tooltip_text(Some("Show sidebar (Ctrl+B)"));
+    expand_btn.set_tooltip_text(Some(&sidebar_toggle_tooltip(&shortcuts, false)));
     expand_btn.set_valign(gtk::Align::Center);
     expand_btn.set_halign(gtk::Align::Start);
     expand_btn.set_visible(false);
@@ -920,6 +920,15 @@ fn dispatch_shortcut_command(state: &State, command: ShortcutCommand) {
         ShortcutCommand::ActivateWorkspace8 => activate_workspace_shortcut(state, 7),
         ShortcutCommand::ActivateLastWorkspace => activate_last_workspace_shortcut(state),
     }
+}
+
+fn sidebar_toggle_tooltip(shortcuts: &ResolvedShortcutConfig, visible: bool) -> String {
+    let base = if visible {
+        "Hide sidebar"
+    } else {
+        "Show sidebar"
+    };
+    shortcuts.tooltip_text(ShortcutId::ToggleSidebar, base)
 }
 
 fn activate_workspace_shortcut(state: &State, idx: usize) {
@@ -1629,6 +1638,10 @@ fn create_pane_for_workspace(
     working_directory: Option<&str>,
     initial_state: Option<&PaneState>,
 ) -> gtk::Box {
+    let shortcuts = {
+        let s = state.borrow();
+        s.shortcuts.clone()
+    };
     let state_for_split = state.clone();
     let state_for_close = state.clone();
     let state_for_bell = state.clone();
@@ -1675,7 +1688,7 @@ fn create_pane_for_workspace(
         }),
     });
 
-    pane::create_pane(callbacks, working_directory, initial_state)
+    pane::create_pane(callbacks, shortcuts, working_directory, initial_state)
 }
 
 fn close_workspace(state: &State) {
@@ -2220,7 +2233,7 @@ fn mark_workspace_unread(state: &State, ws_id: &str) {
 mod tests {
     use super::{
         clamp_workspace_insert_index_for_pinning, favorites_prefix_len,
-        shortcut_command_from_key_event,
+        shortcut_command_from_key_event, sidebar_toggle_tooltip,
     };
     use crate::shortcut_config::{default_shortcuts, resolve_shortcuts_from_str, ShortcutCommand};
     use super::gtk::gdk;
@@ -2320,5 +2333,35 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn sidebar_toggle_tooltip_reflects_remaps_and_unbinds() {
+        let defaults = default_shortcuts();
+        assert_eq!(sidebar_toggle_tooltip(&defaults, true), "Hide sidebar (Ctrl+B)");
+        assert_eq!(sidebar_toggle_tooltip(&defaults, false), "Show sidebar (Ctrl+B)");
+
+        let remapped = resolve_shortcuts_from_str(
+            r#"{
+                "shortcuts": {
+                    "toggle_sidebar": "<Ctrl><Alt>b"
+                }
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            sidebar_toggle_tooltip(&remapped, true),
+            "Hide sidebar (Ctrl+Alt+B)"
+        );
+
+        let unbound = resolve_shortcuts_from_str(
+            r#"{
+                "shortcuts": {
+                    "toggle_sidebar": null
+                }
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(sidebar_toggle_tooltip(&unbound, false), "Show sidebar");
     }
 }

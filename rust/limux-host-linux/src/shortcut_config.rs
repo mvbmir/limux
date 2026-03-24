@@ -465,6 +465,27 @@ impl NormalizedShortcut {
         parts.push(self.key.as_str());
         parts.join("+")
     }
+
+    pub fn to_display_label(&self) -> String {
+        let mut parts = Vec::new();
+        if self.ctrl {
+            parts.push("Ctrl".to_string());
+        }
+        if self.alt {
+            parts.push("Alt".to_string());
+        }
+        if self.meta {
+            parts.push("Meta".to_string());
+        }
+        if self.shift {
+            parts.push("Shift".to_string());
+        }
+        if self.super_key {
+            parts.push("Super".to_string());
+        }
+        parts.push(display_key_label(&self.key));
+        parts.join("+")
+    }
 }
 
 impl ResolvedShortcut {
@@ -494,16 +515,22 @@ impl ResolvedShortcutConfig {
             .map(|shortcut| shortcut.definition.command)
     }
 
+    pub fn display_label_for_id(&self, id: ShortcutId) -> Option<String> {
+        self.find_by_id(id)
+            .and_then(|shortcut| shortcut.binding.as_ref())
+            .map(NormalizedShortcut::to_display_label)
+    }
+
+    pub fn tooltip_text(&self, id: ShortcutId, base: &str) -> String {
+        self.display_label_for_id(id)
+            .map(|label| format!("{base} ({label})"))
+            .unwrap_or_else(|| base.to_string())
+    }
+
     pub fn find_by_id(&self, id: ShortcutId) -> Option<&ResolvedShortcut> {
         self.shortcuts
             .iter()
             .find(|shortcut| shortcut.definition.id == id)
-    }
-
-    pub fn find_by_action_name(&self, action_name: &str) -> Option<&ResolvedShortcut> {
-        self.shortcuts
-            .iter()
-            .find(|shortcut| shortcut.definition.action_name == action_name)
     }
 
     pub fn find_by_runtime_combo(&self, combo: &str) -> Option<&ResolvedShortcut> {
@@ -698,6 +725,37 @@ fn runtime_key_to_gtk_key(key: &str) -> String {
     }
 }
 
+fn display_key_label(key: &str) -> String {
+    match key {
+        "page_up" => "Page Up".to_string(),
+        "page_down" => "Page Down".to_string(),
+        "left" => "Left".to_string(),
+        "right" => "Right".to_string(),
+        "up" => "Up".to_string(),
+        "down" => "Down".to_string(),
+        "enter" => "Enter".to_string(),
+        "escape" => "Esc".to_string(),
+        "tab" => "Tab".to_string(),
+        other if other.chars().count() == 1 => other.to_ascii_uppercase(),
+        other => other
+            .split('_')
+            .filter(|part| !part.is_empty())
+            .map(|part| {
+                let mut chars = part.chars();
+                match chars.next() {
+                    Some(first) => {
+                        let mut label = first.to_ascii_uppercase().to_string();
+                        label.push_str(chars.as_str());
+                        label
+                    }
+                    None => String::new(),
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" "),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -883,6 +941,41 @@ mod tests {
         assert_eq!(
             resolved.command_for_runtime_combo("ctrl+9"),
             Some(ShortcutCommand::ActivateLastWorkspace)
+        );
+    }
+
+    #[test]
+    fn resolved_shortcuts_format_tooltip_text_and_omit_unbound_suffixes() {
+        let defaults = default_shortcuts();
+        assert_eq!(
+            defaults.tooltip_text(ShortcutId::ToggleSidebar, "Toggle Sidebar"),
+            "Toggle Sidebar (Ctrl+B)"
+        );
+
+        let remapped = resolve_shortcuts_from_str(
+            r#"{
+                "shortcuts": {
+                    "toggle_sidebar": "<Ctrl><Alt>b"
+                }
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            remapped.tooltip_text(ShortcutId::ToggleSidebar, "Toggle Sidebar"),
+            "Toggle Sidebar (Ctrl+Alt+B)"
+        );
+
+        let unbound = resolve_shortcuts_from_str(
+            r#"{
+                "shortcuts": {
+                    "toggle_sidebar": null
+                }
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            unbound.tooltip_text(ShortcutId::ToggleSidebar, "Toggle Sidebar"),
+            "Toggle Sidebar"
         );
     }
 }

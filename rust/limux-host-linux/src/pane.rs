@@ -12,6 +12,7 @@ use gtk::prelude::*;
 use gtk4 as gtk;
 
 use crate::layout_state::{PaneState, TabContentState, TabState as SavedTabState};
+use crate::shortcut_config::{ResolvedShortcutConfig, ShortcutId};
 use crate::terminal::{self, TerminalCallbacks};
 
 // ---------------------------------------------------------------------------
@@ -148,6 +149,7 @@ pub const PANE_CSS: &str = r#"
 
 pub fn create_pane(
     callbacks: Rc<PaneCallbacks>,
+    shortcuts: Rc<ResolvedShortcutConfig>,
     working_directory: Option<&str>,
     initial_state: Option<&PaneState>,
 ) -> gtk::Box {
@@ -187,11 +189,30 @@ pub fn create_pane(
         .spacing(1)
         .build();
 
-    let new_term_btn = icon_button("utilities-terminal-symbolic", "New terminal tab");
-    let new_browser_btn = icon_button("limux-globe-symbolic", "New browser tab");
-    let split_h_btn = icon_button("limux-split-horizontal-symbolic", "Split right");
-    let split_v_btn = icon_button("limux-split-vertical-symbolic", "Split down");
-    let close_btn = icon_button("window-close-symbolic", "Close pane");
+    let new_term_btn = icon_button(
+        "utilities-terminal-symbolic",
+        &pane_action_tooltip(&shortcuts, "New terminal tab", Some(ShortcutId::NewTerminal)),
+    );
+    let new_browser_btn = icon_button(
+        "limux-globe-symbolic",
+        &pane_action_tooltip(&shortcuts, "New browser tab", None),
+    );
+    let split_h_btn = icon_button(
+        "limux-split-horizontal-symbolic",
+        &pane_action_tooltip(&shortcuts, "Split right", Some(ShortcutId::SplitRight)),
+    );
+    let split_v_btn = icon_button(
+        "limux-split-vertical-symbolic",
+        &pane_action_tooltip(&shortcuts, "Split down", Some(ShortcutId::SplitDown)),
+    );
+    let close_btn = icon_button(
+        "window-close-symbolic",
+        &pane_action_tooltip(
+            &shortcuts,
+            "Close pane",
+            Some(ShortcutId::CloseFocusedPane),
+        ),
+    );
 
     actions.append(&new_term_btn);
     actions.append(&new_browser_btn);
@@ -391,6 +412,16 @@ fn icon_button(icon_name: &str, tooltip: &str) -> gtk::Button {
         .build();
     btn.add_css_class("limux-pane-action");
     btn
+}
+
+fn pane_action_tooltip(
+    shortcuts: &ResolvedShortcutConfig,
+    base: &str,
+    shortcut_id: Option<ShortcutId>,
+) -> String {
+    shortcut_id
+        .map(|id| shortcuts.tooltip_text(id, base))
+        .unwrap_or_else(|| base.to_string())
 }
 
 /// Create a split-pane icon button with two rectangles separated by a divider.
@@ -1395,4 +1426,49 @@ fn create_browser_widget(
     placeholder.set_vexpand(true);
 
     (placeholder.upcast(), "Browser".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::pane_action_tooltip;
+    use crate::shortcut_config::{default_shortcuts, resolve_shortcuts_from_str, ShortcutId};
+
+    #[test]
+    fn pane_action_tooltip_reflects_remaps_and_unbinds() {
+        let defaults = default_shortcuts();
+        assert_eq!(
+            pane_action_tooltip(&defaults, "New terminal tab", Some(ShortcutId::NewTerminal)),
+            "New terminal tab (Ctrl+T)"
+        );
+        assert_eq!(
+            pane_action_tooltip(&defaults, "New browser tab", None),
+            "New browser tab"
+        );
+
+        let remapped = resolve_shortcuts_from_str(
+            r#"{
+                "shortcuts": {
+                    "split_right": "<Ctrl><Alt>d"
+                }
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            pane_action_tooltip(&remapped, "Split right", Some(ShortcutId::SplitRight)),
+            "Split right (Ctrl+Alt+D)"
+        );
+
+        let unbound = resolve_shortcuts_from_str(
+            r#"{
+                "shortcuts": {
+                    "close_focused_pane": null
+                }
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            pane_action_tooltip(&unbound, "Close pane", Some(ShortcutId::CloseFocusedPane)),
+            "Close pane"
+        );
+    }
 }
