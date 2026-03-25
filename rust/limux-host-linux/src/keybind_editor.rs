@@ -96,6 +96,8 @@ pub fn build_keybind_editor(
     let outer = gtk::Box::new(gtk::Orientation::Vertical, 0);
     outer.add_css_class("limux-keybind-editor");
     outer.set_width_request(540);
+    outer.set_hexpand(true);
+    outer.set_vexpand(true);
     outer.set_focusable(true);
     outer.set_can_focus(true);
 
@@ -267,10 +269,11 @@ pub fn build_keybind_editor(
     let scroller = gtk::ScrolledWindow::builder()
         .hscrollbar_policy(gtk::PolicyType::Never)
         .vscrollbar_policy(gtk::PolicyType::Automatic)
-        .min_content_height(420)
         .child(&rows_box)
         .build();
     scroller.add_css_class("limux-keybind-scroll");
+    scroller.set_hexpand(true);
+    scroller.set_vexpand(true);
 
     outer.append(&header);
     outer.append(&hint);
