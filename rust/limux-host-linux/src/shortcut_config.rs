@@ -1828,10 +1828,7 @@ mod tests {
             resolved.command_for_runtime_combo("ctrl+t"),
             Some(ShortcutCommand::NewTerminal)
         );
-        assert_eq!(
-            resolved.command_for_runtime_combo("ctrl+c"),
-            None
-        );
+        assert_eq!(resolved.command_for_runtime_combo("ctrl+c"), None);
         assert_eq!(
             resolved.command_for_runtime_combo("ctrl+shift+c"),
             Some(ShortcutCommand::TerminalCopy)
