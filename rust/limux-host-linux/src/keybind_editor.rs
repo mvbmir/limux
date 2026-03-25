@@ -121,7 +121,7 @@ pub fn build_keybind_editor(
 
     let hint = gtk::Label::builder()
         .label(
-            "Click a shortcut field, then press a Ctrl or Alt combo. Shift is allowed as an additional modifier. Press Del to unbind. Press Esc to cancel.",
+            "Click a shortcut field, then press a Ctrl, Alt, or Super combo. Shift is allowed as an additional modifier. Press Del to unbind. Press Esc to cancel.",
         )
         .wrap(true)
         .xalign(0.0)
@@ -400,7 +400,7 @@ fn capture_outcome_for_key_press(
 fn validation_error_message(err: &ShortcutConfigError) -> String {
     match err {
         ShortcutConfigError::BaseModifierRequired { .. } => {
-            "Use Ctrl or Alt together with another key.".to_string()
+            "Use Ctrl, Alt, or Super together with another key.".to_string()
         }
         ShortcutConfigError::ModifierOnlyBinding { .. } => {
             "Choose a non-modifier key for this shortcut.".to_string()
@@ -457,7 +457,7 @@ mod tests {
         };
         assert_eq!(
             validation_error_message(&err),
-            "Use Ctrl or Alt together with another key."
+            "Use Ctrl, Alt, or Super together with another key."
         );
     }
 

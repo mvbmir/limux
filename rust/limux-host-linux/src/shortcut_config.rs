@@ -167,10 +167,10 @@ impl std::fmt::Display for ShortcutConfigError {
                 )
             }
             Self::BaseModifierRequired { .. } => {
-                write!(f, "use Ctrl or Alt with another key")
+                write!(f, "use Ctrl, Alt, or Super with another key")
             }
             Self::ModifierOnlyBinding { .. } => {
-                write!(f, "choose a non-modifier key with Ctrl or Alt")
+                write!(f, "choose a non-modifier key with Ctrl, Alt, or Super")
             }
             Self::InvalidJson(reason) => write!(f, "invalid shortcut config JSON: {reason}"),
         }
@@ -570,7 +570,7 @@ impl NormalizedShortcut {
                 input: self.to_gtk_accel(),
             });
         }
-        if !self.ctrl && !self.alt {
+        if !self.ctrl && !self.alt && !self.super_key {
             return Err(ShortcutConfigError::BaseModifierRequired {
                 shortcut_id: shortcut_id.to_string(),
                 input: self.to_gtk_accel(),
@@ -1222,6 +1222,14 @@ mod tests {
     }
 
     #[test]
+    fn normalized_shortcut_round_trips_super_modifier_forms() {
+        let shortcut = NormalizedShortcut::parse("<Super><Shift>t").unwrap();
+        assert_eq!(shortcut.to_gtk_accel(), "<Shift><Super>t");
+        assert_eq!(shortcut.to_runtime_combo(), "shift+super+t");
+        assert_eq!(shortcut.to_display_label(), "Shift+Super+T");
+    }
+
+    #[test]
     fn unshifted_keyval_from_mappings_uses_same_group_level_zero_key() {
         let keyval_mappings = vec![gdk::KeymapKey::new(10, 1, 1)];
         let keycode_mappings = vec![
@@ -1527,7 +1535,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_shortcuts_from_str_rejects_bindings_without_ctrl_or_alt() {
+    fn resolve_shortcuts_from_str_rejects_bindings_without_ctrl_alt_or_super() {
         let err = resolve_shortcuts_from_str(
             r#"{
                 "shortcuts": {
@@ -1542,6 +1550,29 @@ mod tests {
             ShortcutConfigError::BaseModifierRequired { shortcut_id, .. }
                 if shortcut_id == "split_right"
         ));
+    }
+
+    #[test]
+    fn resolve_shortcuts_from_str_accepts_super_based_bindings() {
+        let resolved = resolve_shortcuts_from_str(
+            r#"{
+                "shortcuts": {
+                    "split_right": "<Super>h"
+                }
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            resolved
+                .display_label_for_id(ShortcutId::SplitRight)
+                .as_deref(),
+            Some("Super+H")
+        );
+        assert_eq!(
+            resolved.command_for_runtime_combo("super+h"),
+            Some(ShortcutCommand::SplitRight)
+        );
     }
 
     #[test]

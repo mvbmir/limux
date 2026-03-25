@@ -2528,6 +2528,31 @@ mod tests {
     }
 
     #[test]
+    fn shortcut_command_from_key_event_honors_super_remaps() {
+        let shortcuts = resolve_shortcuts_from_str(
+            r#"{
+                "shortcuts": {
+                    "toggle_sidebar": "<Super>b"
+                }
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            shortcut_command_from_key_event(
+                &shortcuts,
+                gdk::Key::B,
+                gdk::ModifierType::CONTROL_MASK
+            ),
+            None
+        );
+        assert_eq!(
+            shortcut_command_from_key_event(&shortcuts, gdk::Key::B, gdk::ModifierType::SUPER_MASK),
+            Some(ShortcutCommand::ToggleSidebar)
+        );
+    }
+
+    #[test]
     fn shortcut_dispatch_propagation_stops_only_when_window_claims_shortcut() {
         assert_eq!(shortcut_dispatch_propagation(true), glib::Propagation::Stop);
         assert_eq!(
