@@ -108,6 +108,9 @@ pub fn build_keybind_editor(
     popover.set_parent(anchor);
     popover.set_has_arrow(false);
     popover.set_autohide(true);
+    popover.set_focusable(true);
+    popover.set_can_focus(true);
+    popover.set_focus_on_click(true);
     popover.set_position(gtk::PositionType::Bottom);
     let allocation = anchor.allocation();
     popover.set_pointing_to(Some(&gtk::gdk::Rectangle::new(
@@ -199,6 +202,7 @@ pub fn build_keybind_editor(
         binding_button.add_css_class("limux-keybind-capture");
         binding_button.set_focusable(true);
         binding_button.set_can_focus(true);
+        binding_button.set_focus_on_click(true);
         binding_button.set_halign(gtk::Align::End);
 
         let error_label = gtk::Label::builder()
@@ -246,6 +250,7 @@ pub fn build_keybind_editor(
         let state = state.clone();
         let on_capture = on_capture.clone();
         let key_controller = gtk::EventControllerKey::new();
+        key_controller.set_propagation_phase(gtk::PropagationPhase::Capture);
         key_controller.connect_key_pressed(move |controller, keyval, keycode, modifier| {
             let Some(shortcut_id) = *listening.borrow() else {
                 return gtk::glib::Propagation::Proceed;
@@ -297,15 +302,15 @@ pub fn build_keybind_editor(
             );
             gtk::glib::Propagation::Stop
         });
-        outer.add_controller(key_controller);
+        popover.add_controller(key_controller);
     }
 
     {
-        let outer = outer.clone();
-        popover.connect_map(move |_| {
-            let outer = outer.clone();
+        let popover = popover.clone();
+        popover.clone().connect_map(move |_| {
+            let popover = popover.clone();
             gtk::glib::idle_add_local_once(move || {
-                outer.grab_focus();
+                popover.grab_focus();
             });
         });
     }
