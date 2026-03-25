@@ -669,6 +669,23 @@ impl ResolvedShortcutConfig {
             })
             .collect()
     }
+
+    pub fn with_binding(
+        &self,
+        id: ShortcutId,
+        binding: Option<NormalizedShortcut>,
+    ) -> Result<Self, ShortcutConfigError> {
+        let mut updated = self.clone();
+        if let Some(shortcut) = updated
+            .shortcuts
+            .iter_mut()
+            .find(|shortcut| shortcut.definition.id == id)
+        {
+            shortcut.binding = binding;
+        }
+        ensure_valid_active_bindings(&updated.shortcuts)?;
+        Ok(updated)
+    }
 }
 
 pub fn definitions() -> &'static [ShortcutDefinition] {
@@ -1213,6 +1230,23 @@ mod tests {
         );
         assert_eq!(overrides.get("close_focused_pane"), Some(&Value::Null));
         assert!(!overrides.contains_key("toggle_sidebar"));
+    }
+
+    #[test]
+    fn with_binding_updates_one_shortcut_and_revalidates() {
+        let updated = default_shortcuts()
+            .with_binding(
+                ShortcutId::SplitRight,
+                Some(NormalizedShortcut::parse("<Ctrl>h").unwrap()),
+            )
+            .unwrap();
+
+        assert_eq!(
+            updated
+                .display_label_for_id(ShortcutId::SplitRight)
+                .as_deref(),
+            Some("Ctrl+H")
+        );
     }
 
     #[test]

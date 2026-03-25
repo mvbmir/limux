@@ -50,9 +50,9 @@ T3 ── T4 ──┘
 - **location**: `rust/limux-host-linux/src/main.rs`, `rust/limux-host-linux/src/window.rs`, `rust/limux-host-linux/src/pane.rs`
 - **description**: Refactor the current startup-only shortcut wiring into a live update path. `AppState` should own the effective shortcut registry in a mutable form, expose one helper that swaps in a newly validated registry, reapplies GTK accelerators through the `adw::Application`, and refreshes host-owned tooltip surfaces that show shortcuts today. Extend pane internals as needed so existing pane header buttons can refresh their tooltips instead of only reflecting shortcuts at creation time.
 - **validation**: A single runtime update path exists for shortcut changes. After applying a new registry, the capture-phase handler, GTK accelerators, sidebar tooltip, and pane button tooltips all reflect the new bindings without reopening the app.
-- **status**: Not Completed
-- **log**:
-- **files edited/created**:
+- **status**: Completed
+- **log**: RED phase used focused `shortcut_config` tests for invalid base modifiers, modifier-only keys, override serialization, preserved top-level config keys, and non-clobbering invalid-JSON failure behavior. GREEN changes extended the canonical shortcut model with host-binding validation (`Ctrl` or `Alt` required, modifier-only keys rejected), editor-facing default/current display helpers, override serialization, and atomic merged writes for the `shortcuts` section inside `config.json`. Validation command: `cargo test -p limux-host-linux shortcut_config::tests -- --nocapture`.
+- **files edited/created**: `rust/limux-host-linux/src/shortcut_config.rs`, `terminal-keybinds-settings-plan.md`
 
 ### T3: Add a Terminal Context-Menu Entry Point for Keybind Settings
 - **depends_on**: []
