@@ -755,6 +755,8 @@ pub fn build_window(app: &adw::Application) {
     let main_paned = gtk::Paned::builder()
         .orientation(gtk::Orientation::Horizontal)
         .position(220)
+        .resize_start_child(false)
+        .resize_end_child(true)
         .shrink_start_child(false)
         .shrink_end_child(false)
         .start_child(&sidebar)
@@ -3261,6 +3263,22 @@ mod tests {
                 gdk::ModifierType::CONTROL_MASK
             ),
             Some(ShortcutCommand::SurfaceFind)
+        );
+        assert_eq!(
+            shortcut_command_from_key_event(
+                &shortcuts,
+                gdk::Key::C,
+                gdk::ModifierType::CONTROL_MASK
+            ),
+            None
+        );
+        assert_eq!(
+            shortcut_command_from_key_event(
+                &shortcuts,
+                gdk::Key::C,
+                gdk::ModifierType::CONTROL_MASK | gdk::ModifierType::SHIFT_MASK
+            ),
+            Some(ShortcutCommand::TerminalCopy)
         );
         assert_eq!(
             shortcut_command_from_key_event(

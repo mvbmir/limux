@@ -775,7 +775,7 @@ const SHORTCUT_DEFINITIONS: [ShortcutDefinition; 47] = [
         id: ShortcutId::TerminalCopy,
         config_key: "terminal_copy",
         action_name: "win.terminal-copy",
-        default_accel: "<Ctrl>c",
+        default_accel: "<Ctrl><Shift>c",
         label: "Terminal Copy",
         registers_gtk_accel: false,
         command: ShortcutCommand::TerminalCopy,
@@ -1827,6 +1827,14 @@ mod tests {
         assert_eq!(
             resolved.command_for_runtime_combo("ctrl+t"),
             Some(ShortcutCommand::NewTerminal)
+        );
+        assert_eq!(
+            resolved.command_for_runtime_combo("ctrl+c"),
+            None
+        );
+        assert_eq!(
+            resolved.command_for_runtime_combo("ctrl+shift+c"),
+            Some(ShortcutCommand::TerminalCopy)
         );
         assert_eq!(
             resolved.command_for_runtime_combo("ctrl+shift+t"),
