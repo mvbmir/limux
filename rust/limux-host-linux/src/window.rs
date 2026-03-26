@@ -1350,7 +1350,7 @@ fn persist_shortcut_binding(
             .map_err(|err| err.to_string())?
     };
 
-    let Some(path) = shortcut_config::config_path() else {
+    let Some(path) = shortcut_config::shortcuts_path() else {
         return Err("config directory unavailable".to_string());
     };
 

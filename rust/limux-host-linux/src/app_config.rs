@@ -6,6 +6,8 @@ use serde_json::{json, Value};
 
 use crate::shortcut_config;
 
+pub const SETTINGS_FILE_NAME: &str = "settings.json";
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
 pub struct AppConfig {
     #[serde(default)]
@@ -25,7 +27,7 @@ pub struct LoadedAppConfig {
 }
 
 pub fn load() -> LoadedAppConfig {
-    let Some(path) = shortcut_config::config_path() else {
+    let Some(path) = settings_path() else {
         let mut loaded = LoadedAppConfig::default();
         loaded
             .warnings
@@ -43,6 +45,15 @@ pub fn load() -> LoadedAppConfig {
     }
 
     load_from_path(&path)
+}
+
+pub fn settings_path() -> Option<std::path::PathBuf> {
+    shortcut_config::config_dir_path().map(|dir| dir.join(SETTINGS_FILE_NAME))
+}
+
+#[cfg(test)]
+pub fn settings_path_in(base: &Path) -> std::path::PathBuf {
+    shortcut_config::config_dir_path_in(base).join(SETTINGS_FILE_NAME)
 }
 
 pub fn load_from_path(path: &Path) -> LoadedAppConfig {
@@ -117,13 +128,12 @@ fn ensure_default_config_file(path: &Path) -> std::io::Result<()> {
 mod tests {
     use super::*;
 
-    use crate::shortcut_config;
     use tempfile::TempDir;
 
     #[test]
     fn load_from_path_uses_defaults_when_file_is_missing() {
         let dir = TempDir::new().expect("temp dir");
-        let path = shortcut_config::config_path_in(dir.path());
+        let path = settings_path_in(dir.path());
 
         let loaded = load_from_path(&path);
 
@@ -131,9 +141,16 @@ mod tests {
     }
 
     #[test]
+    fn settings_path_in_uses_limux_settings_json() {
+        let path = settings_path_in(Path::new("/tmp/example"));
+
+        assert_eq!(path, Path::new("/tmp/example/limux/settings.json"));
+    }
+
+    #[test]
     fn ensure_default_config_file_writes_opt_in_false_setting() {
         let dir = TempDir::new().expect("temp dir");
-        let path = shortcut_config::config_path_in(dir.path());
+        let path = settings_path_in(dir.path());
 
         ensure_default_config_file(&path).expect("write default config");
 
@@ -145,14 +162,11 @@ mod tests {
     #[test]
     fn load_from_path_reads_focus_settings_and_ignores_other_sections() {
         let dir = TempDir::new().expect("temp dir");
-        let path = shortcut_config::config_path_in(dir.path());
+        let path = settings_path_in(dir.path());
         fs::create_dir_all(path.parent().expect("config dir")).expect("create config dir");
         fs::write(
             &path,
             r#"{
-  "shortcuts": {
-    "split_right": "<Ctrl>h"
-  },
   "focus": {
     "hover_terminal_focus": true
   }
@@ -170,7 +184,7 @@ mod tests {
     #[test]
     fn load_from_path_falls_back_to_defaults_on_invalid_json() {
         let dir = TempDir::new().expect("temp dir");
-        let path = shortcut_config::config_path_in(dir.path());
+        let path = settings_path_in(dir.path());
         fs::create_dir_all(path.parent().expect("config dir")).expect("create config dir");
         fs::write(&path, "not json").expect("write config");
 
