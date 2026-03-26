@@ -184,6 +184,7 @@ pub fn init_ghostty() {
             supports_selection_clipboard: true,
             wakeup_cb: ghostty_wakeup_cb,
             action_cb: ghostty_action_cb,
+            clipboard_has_text_cb: ghostty_clipboard_has_text_cb,
             read_clipboard_cb: ghostty_read_clipboard_cb,
             confirm_read_clipboard_cb: ghostty_confirm_read_clipboard_cb,
             write_clipboard_cb: ghostty_write_clipboard_cb,
@@ -396,11 +397,7 @@ unsafe extern "C" fn ghostty_read_clipboard_cb(
         Some(d) => d,
         None => return,
     };
-    let clipboard = if clipboard_type == GHOSTTY_CLIPBOARD_SELECTION {
-        display.primary_clipboard()
-    } else {
-        display.clipboard()
-    };
+    let clipboard = clipboard_from_type(&display, clipboard_type);
 
     clipboard.read_text_async(gtk::gio::Cancellable::NONE, move |result| {
         // Get clipboard text, defaulting to empty string on failure
@@ -417,6 +414,58 @@ unsafe extern "C" fn ghostty_read_clipboard_cb(
             }
         }
     });
+}
+
+fn clipboard_from_type(display: &gtk::gdk::Display, clipboard_type: c_int) -> gtk::gdk::Clipboard {
+    if clipboard_type == GHOSTTY_CLIPBOARD_SELECTION {
+        display.primary_clipboard()
+    } else {
+        display.clipboard()
+    }
+}
+
+fn clipboard_has_text(clipboard: &gtk::gdk::Clipboard) -> bool {
+    let formats = clipboard.formats();
+    let mime_types = formats.mime_types();
+    if clipboard_formats_include_image(mime_types.iter().map(|mime| mime.as_str())) {
+        return false;
+    }
+
+    clipboard_formats_include_text(
+        formats.contains_type(String::static_type()),
+        mime_types.iter().map(|mime| mime.as_str()),
+    )
+}
+
+fn clipboard_formats_include_image<'a>(mime_types: impl IntoIterator<Item = &'a str>) -> bool {
+    mime_types
+        .into_iter()
+        .any(|mime| mime.starts_with("image/"))
+}
+
+fn clipboard_formats_include_text<'a>(
+    has_string_type: bool,
+    mime_types: impl IntoIterator<Item = &'a str>,
+) -> bool {
+    if !has_string_type {
+        return false;
+    }
+
+    mime_types.into_iter().any(|mime| {
+        mime.eq_ignore_ascii_case("text/plain")
+            || mime.eq_ignore_ascii_case("text/plain;charset=utf-8")
+    })
+}
+
+unsafe extern "C" fn ghostty_clipboard_has_text_cb(
+    _userdata: *mut c_void,
+    clipboard_type: c_int,
+) -> bool {
+    let Some(display) = gtk::gdk::Display::default() else {
+        return false;
+    };
+    let clipboard = clipboard_from_type(&display, clipboard_type);
+    clipboard_has_text(&clipboard)
 }
 
 unsafe extern "C" fn ghostty_confirm_read_clipboard_cb(
@@ -1449,6 +1498,15 @@ mod tests {
             shell_escape_bytes(path),
             b"$'/tmp/line\\nbreak\\tand\\x03escape\\e'"
         );
+    }
+
+    #[test]
+    fn clipboard_formats_include_text_rejects_image_clipboards() {
+        assert!(clipboard_formats_include_text(
+            true,
+            ["text/plain", "text/plain;charset=utf-8"]
+        ));
+        assert!(clipboard_formats_include_image(["image/png", "text/plain"]));
     }
 
     #[test]

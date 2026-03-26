@@ -140,8 +140,8 @@ These are the current supported config keys and defaults:
 | `surface_find_hide` | `<Ctrl><Shift>f` |
 | `surface_use_selection_for_find` | `<Ctrl>e` |
 | `terminal_clear_scrollback` | `<Ctrl>k` |
-| `terminal_copy` | `<Ctrl>c` |
-| `terminal_paste` | `<Ctrl>v` |
+| `terminal_copy` | `<Ctrl><Shift>c` |
+| `terminal_paste` | `<Ctrl><Shift>v` |
 | `terminal_increase_font_size` | `<Ctrl>plus` |
 | `terminal_decrease_font_size` | `<Ctrl>minus` |
 | `terminal_reset_font_size` | `<Ctrl><Shift>0` |
@@ -437,7 +437,7 @@ Verify with a terminal tab focused:
 - `Ctrl+F` opens terminal search
 - `Ctrl+G` and `Ctrl+Shift+G` move through terminal search results
 - `Ctrl+E` uses the current terminal selection for search
-- `Ctrl+K`, `Ctrl+C`, `Ctrl+V`, `Ctrl++`, `Ctrl+-`, and `Ctrl+Shift+0` affect only the terminal
+- `Ctrl+K`, `Ctrl+Shift+C`, `Ctrl+Shift+V`, `Ctrl++`, `Ctrl+-`, and `Ctrl+Shift+0` affect only the terminal
 
 Verify with a browser tab focused:
 

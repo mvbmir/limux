@@ -24,11 +24,22 @@ fn append_env(key: &str, value: &str) {
     }
 }
 
+fn has_ghostty_terminfo(path: &Path) -> bool {
+    let Some(parent) = path.parent() else {
+        return false;
+    };
+
+    ["terminfo/g/ghostty", "terminfo/x/xterm-ghostty"]
+        .iter()
+        .any(|entry| parent.join(entry).is_file())
+}
+
 fn is_ghostty_resources_dir(path: &Path) -> bool {
     path.is_dir()
-        && ["themes", "terminfo", "shell-integration"]
+        && ["themes", "shell-integration"]
             .iter()
-            .any(|entry| path.join(entry).is_dir())
+            .all(|entry| path.join(entry).is_dir())
+        && has_ghostty_terminfo(path)
 }
 
 fn ghostty_resources_candidates(exe_dir: &Path) -> Vec<PathBuf> {
@@ -123,9 +134,14 @@ mod tests {
     fn resolves_app_specific_bundled_resources_next_to_executable() {
         let root = temp_path("resources");
         let exe_dir = root.join("bin");
-        let resources_dir = root.join("share/limux/ghostty/themes");
+        let themes_dir = root.join("share/limux/ghostty/themes");
+        let shell_integration_dir = root.join("share/limux/ghostty/shell-integration");
+        let terminfo_file = root.join("share/limux/terminfo/g/ghostty");
         fs::create_dir_all(&exe_dir).unwrap();
-        fs::create_dir_all(&resources_dir).unwrap();
+        fs::create_dir_all(&themes_dir).unwrap();
+        fs::create_dir_all(&shell_integration_dir).unwrap();
+        fs::create_dir_all(terminfo_file.parent().unwrap()).unwrap();
+        fs::write(&terminfo_file, b"ghostty").unwrap();
 
         let exe = exe_dir.join("limux");
         let resolved = resolve_ghostty_resources_dir(&exe).unwrap();
@@ -138,13 +154,32 @@ mod tests {
     fn resolves_dev_checkout_resources_from_target_binary() {
         let root = temp_path("dev-resources");
         let exe_dir = root.join("target/release");
-        let resources_dir = root.join("ghostty/zig-out/share/ghostty/terminfo");
+        let themes_dir = root.join("ghostty/zig-out/share/ghostty/themes");
+        let shell_integration_dir = root.join("ghostty/zig-out/share/ghostty/shell-integration");
+        let terminfo_file = root.join("ghostty/zig-out/share/terminfo/x/xterm-ghostty");
         fs::create_dir_all(&exe_dir).unwrap();
-        fs::create_dir_all(&resources_dir).unwrap();
+        fs::create_dir_all(&themes_dir).unwrap();
+        fs::create_dir_all(&shell_integration_dir).unwrap();
+        fs::create_dir_all(terminfo_file.parent().unwrap()).unwrap();
+        fs::write(&terminfo_file, b"xterm-ghostty").unwrap();
 
         let exe = exe_dir.join("limux");
         let resolved = resolve_ghostty_resources_dir(&exe).unwrap();
         assert_eq!(resolved, root.join("ghostty/zig-out/share/ghostty"));
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn rejects_resource_dirs_without_sibling_terminfo() {
+        let root = temp_path("missing-terminfo");
+        let resources_dir = root.join("ghostty/zig-out/share/ghostty");
+        let themes_dir = resources_dir.join("themes");
+        let shell_integration_dir = resources_dir.join("shell-integration");
+        fs::create_dir_all(&themes_dir).unwrap();
+        fs::create_dir_all(&shell_integration_dir).unwrap();
+
+        assert!(!is_ghostty_resources_dir(&resources_dir));
 
         fs::remove_dir_all(root).unwrap();
     }

@@ -138,8 +138,8 @@ Most default shortcuts use `Ctrl`. Fullscreen defaults to `F11`. Custom remaps m
 | Shortcut | Action |
 |---|---|
 | `Ctrl+K` | Clear scrollback |
-| `Ctrl+C` | Copy selection |
-| `Ctrl+V` | Paste |
+| `Ctrl+Shift+C` | Copy selection |
+| `Ctrl+Shift+V` | Paste |
 | `Ctrl++` | Increase font size |
 | `Ctrl+-` | Decrease font size |
 | `Ctrl+Shift+0` | Reset font size |
