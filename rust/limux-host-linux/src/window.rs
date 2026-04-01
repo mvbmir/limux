@@ -2,7 +2,6 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use adw::prelude::*;
-use gtk::gdk::prelude::ToplevelExt;
 use gtk::gio;
 use gtk::glib;
 use gtk::glib::variant::ToVariant;
@@ -334,26 +333,6 @@ fn sidebar_is_visible(state: &AppState) -> bool {
         .unwrap_or(false)
 }
 
-fn begin_window_move_from_widget(
-    widget: &impl IsA<gtk::Widget>,
-    window: &adw::ApplicationWindow,
-    device: &gtk::gdk::Device,
-    button: i32,
-    x: f64,
-    y: f64,
-    timestamp: u32,
-) {
-    let Some((surface_x, surface_y)) = widget.translate_coordinates(window, x, y) else {
-        return;
-    };
-    let Some(surface) = window.surface() else {
-        return;
-    };
-    let Ok(toplevel) = surface.dynamic_cast::<gtk::gdk::Toplevel>() else {
-        return;
-    };
-    toplevel.begin_move(device, button, surface_x, surface_y, timestamp);
-}
 
 fn split_ratio_state(paned: &gtk::Paned) -> Option<Rc<RefCell<f64>>> {
     unsafe {
@@ -701,6 +680,29 @@ row:selected .limux-ws-path {
 .limux-content {
     background-color: @window_bg_color;
 }
+.limux-drag-bar {
+    background-color: @window_bg_color;
+    min-height: 22px;
+    border-bottom: 1px solid alpha(@window_fg_color, 0.06);
+}
+.limux-wm-btn {
+    background: none;
+    border: none;
+    border-radius: 3px;
+    padding: 0 7px;
+    min-height: 0;
+    min-width: 0;
+    color: alpha(@window_fg_color, 0.4);
+    font-size: 10px;
+}
+.limux-wm-btn:hover {
+    color: alpha(@window_fg_color, 0.85);
+    background: alpha(@window_fg_color, 0.1);
+}
+.limux-wm-close:hover {
+    color: @error_color;
+    background: alpha(@error_color, 0.14);
+}
 "#;
 
 const CONTENT_BACKGROUND_RGB: (u8, u8, u8) = (23, 23, 23);
@@ -821,38 +823,14 @@ pub fn build_window(app: &adw::Application) {
         .child(&sidebar_list)
         .build();
 
-    let sidebar_title_label = gtk::Label::builder()
-        .label("WORKSPACES")
-        .xalign(0.0)
-        .hexpand(true)
-        .margin_start(12)
-        .build();
-    sidebar_title_label.add_css_class("limux-sidebar-title");
-
     let sidebar_title = gtk::Box::builder()
         .orientation(gtk::Orientation::Horizontal)
-        .margin_top(8)
+        .margin_top(4)
         .margin_bottom(4)
+        .margin_start(6)
         .margin_end(6)
+        .spacing(2)
         .build();
-    sidebar_title.append(&sidebar_title_label);
-
-    {
-        let window = window.clone();
-        let drag_title = sidebar_title.clone();
-        let drag = gtk::GestureClick::new();
-        drag.set_button(1);
-        drag.connect_pressed(move |gesture, _, x, y| {
-            let Some(device) = gesture.current_event_device() else {
-                return;
-            };
-            let button = gesture.current_button() as i32;
-            let timestamp = gesture.current_event_time();
-            begin_window_move_from_widget(&drag_title, &window, &device, button, x, y, timestamp);
-            gesture.set_state(gtk::EventSequenceState::Claimed);
-        });
-        sidebar_title.add_controller(drag);
-    }
 
     let new_ws_btn = gtk::Button::builder()
         .label("New Workspace")
@@ -896,6 +874,69 @@ pub fn build_window(app: &adw::Application) {
     sidebar.append(&sidebar_scroll);
     sidebar.append(&new_ws_btn);
 
+    // Top bar: wm buttons, sidebar toggle, then draggable space.
+    let top_bar_box = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .hexpand(true)
+        .build();
+    top_bar_box.add_css_class("limux-drag-bar");
+
+    let minimize_btn = gtk::Button::builder()
+        .label("\u{2013}")
+        .tooltip_text("Minimize")
+        .build();
+    minimize_btn.add_css_class("limux-wm-btn");
+
+    let maximize_btn = gtk::Button::builder()
+        .label("\u{25A1}")
+        .tooltip_text("Maximize")
+        .build();
+    maximize_btn.add_css_class("limux-wm-btn");
+
+    let close_btn_wm = gtk::Button::builder()
+        .label("\u{2715}")
+        .tooltip_text("Close")
+        .build();
+    close_btn_wm.add_css_class("limux-wm-btn");
+    close_btn_wm.add_css_class("limux-wm-close");
+
+    let sidebar_toggle_btn = gtk::Button::builder()
+        .label("\u{2630}")
+        .tooltip_text("Toggle sidebar")
+        .build();
+    sidebar_toggle_btn.add_css_class("limux-wm-btn");
+
+    top_bar_box.append(&close_btn_wm);
+    top_bar_box.append(&minimize_btn);
+    top_bar_box.append(&maximize_btn);
+    top_bar_box.append(&sidebar_toggle_btn);
+
+    {
+        let win = window.clone();
+        minimize_btn.connect_clicked(move |_| {
+            win.minimize();
+        });
+    }
+    {
+        let win = window.clone();
+        maximize_btn.connect_clicked(move |_| {
+            if win.is_maximized() {
+                win.unmaximize();
+            } else {
+                win.maximize();
+            }
+        });
+    }
+    {
+        let win = window.clone();
+        close_btn_wm.connect_clicked(move |_| {
+            win.close();
+        });
+    }
+
+    let top_bar_handle = gtk::WindowHandle::new();
+    top_bar_handle.set_child(Some(&top_bar_box));
+
     let main_paned = gtk::Paned::builder()
         .orientation(gtk::Orientation::Horizontal)
         .position(220)
@@ -911,6 +952,7 @@ pub fn build_window(app: &adw::Application) {
     if let Some(ref header) = header {
         vbox.append(header);
     }
+    vbox.append(&top_bar_handle);
     vbox.append(&main_paned);
     window.set_content(Some(&vbox));
 
@@ -938,6 +980,13 @@ pub fn build_window(app: &adw::Application) {
         _theme_gnome_settings: None,
         _theme_gnome_signal: None,
     }));
+
+    {
+        let state_toggle = state.clone();
+        sidebar_toggle_btn.connect_clicked(move |_| {
+            toggle_sidebar(&state_toggle);
+        });
+    }
 
     {
         let state = state.clone();
