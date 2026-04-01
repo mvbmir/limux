@@ -802,6 +802,11 @@ pub fn create_terminal(
     gl_area.set_auto_render(true);
     gl_area.set_focusable(true);
     gl_area.set_can_focus(true);
+    // Match Ghostty's explicit GLArea configuration (surface.blp).
+    // Ghostty doesn't use stencil or depth buffers and restricts to GL only.
+    gl_area.set_has_stencil_buffer(false);
+    gl_area.set_has_depth_buffer(false);
+    gl_area.set_allowed_apis(gtk::gdk::GLAPI::GL);
 
     let wd = working_directory.map(|s| s.to_string());
     let hover_focus = options.hover_focus;
