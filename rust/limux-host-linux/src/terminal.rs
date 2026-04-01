@@ -38,18 +38,6 @@ type DesktopNotificationCallback = dyn Fn(&str, &str);
 type VoidCallback = dyn Fn();
 type WidgetCallback = dyn Fn(&gtk::Widget);
 
-/// Minimum interval between rendered frames per surface (in microseconds).
-/// 16_666 µs ≈ 60 fps. During text floods Ghostty fires render requests much
-/// faster than this; throttling prevents the GL draw from monopolizing the
-/// GTK main thread and freezing the UI.
-const RENDER_BUDGET_US: u128 = 16_666;
-
-fn now_micros() -> u128 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_micros())
-        .unwrap_or(0)
-}
 
 /// Per-surface state, stored in a global registry keyed by surface pointer.
 struct SurfaceEntry {
@@ -61,12 +49,6 @@ struct SurfaceEntry {
     on_bell: Option<Box<VoidCallback>>,
     on_close: Option<Box<VoidCallback>>,
     clipboard_context: *mut ClipboardContext,
-    /// Timestamp of the last queued render (monotonic, in µs).
-    last_render_us: Cell<u128>,
-    /// Whether a deferred render is already scheduled.
-    render_pending: Cell<bool>,
-    /// Set by resize handler to bypass throttle on the next render.
-    resize_pending: Cell<bool>,
 }
 
 struct ClipboardContext {
@@ -372,13 +354,6 @@ pub fn init_ghostty() {
 
         let app = unsafe { ghostty_app_new(&runtime_config, config) };
 
-        // Fallback timer: tick periodically in case wakeup callbacks are missed.
-        // The wakeup callback handles the normal fast path; this is a safety net.
-        glib::timeout_add_local(std::time::Duration::from_millis(250), move || {
-            unsafe { ghostty_app_tick(app) };
-            glib::ControlFlow::Continue
-        });
-
         GhosttyState {
             app,
             background_opacity,
@@ -386,7 +361,7 @@ pub fn init_ghostty() {
     });
 }
 
-fn ghostty_app() -> ghostty_app_t {
+pub(crate) fn ghostty_app() -> ghostty_app_t {
     GHOSTTY.get().expect("ghostty not initialized").app
 }
 
@@ -452,19 +427,16 @@ pub fn sync_color_scheme(dark: bool) {
 // Runtime callbacks (C ABI)
 // ---------------------------------------------------------------------------
 
-/// Coalescing flag for wakeup callbacks. Prevents scheduling more than one
-/// idle tick at a time.
-static WAKEUP_PENDING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Flag signaling that Ghostty has pending work. The window's tick callback
+/// checks this once per frame and calls ghostty_app_tick() when set.
+pub(crate) static WAKEUP_PENDING: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 unsafe extern "C" fn ghostty_wakeup_cb(_userdata: *mut c_void) {
-    // Schedule exactly one idle tick. If one is already pending, skip.
-    if !WAKEUP_PENDING.swap(true, std::sync::atomic::Ordering::SeqCst) {
-        glib::idle_add_once(|| {
-            let app = ghostty_app();
-            unsafe { ghostty_app_tick(app) };
-            WAKEUP_PENDING.store(false, std::sync::atomic::Ordering::SeqCst);
-        });
-    }
+    // Signal pending work. The frame-clock tick callback will process it.
+    WAKEUP_PENDING.store(true, std::sync::atomic::Ordering::Release);
+    // Wake the GLib main loop so the tick callback fires promptly.
+    glib::MainContext::default().wakeup();
 }
 
 unsafe extern "C" fn ghostty_action_cb(
@@ -480,46 +452,8 @@ unsafe extern "C" fn ghostty_action_cb(
                 let surface_key = unsafe { target.target.surface } as usize;
                 SURFACE_MAP.with(|map| {
                     if let Some(entry) = map.borrow().get(&surface_key) {
-                        // Skip hidden surfaces entirely.
-                        if !entry.gl_area.is_mapped() {
-                            return;
-                        }
-
-                        // Always render immediately after a resize so the
-                        // terminal grid redraws at the correct dimensions.
-                        if entry.resize_pending.replace(false) {
-                            entry.last_render_us.set(now_micros());
+                        if entry.gl_area.is_mapped() {
                             entry.gl_area.queue_render();
-                            return;
-                        }
-
-                        // Throttle to ~60 fps. During text floods Ghostty fires
-                        // hundreds of render requests per second; each triggers a
-                        // synchronous GL draw that blocks the GTK main thread.
-                        let now = now_micros();
-                        let elapsed = now.saturating_sub(entry.last_render_us.get());
-
-                        if elapsed >= RENDER_BUDGET_US {
-                            entry.last_render_us.set(now);
-                            entry.gl_area.queue_render();
-                        } else if !entry.render_pending.get() {
-                            // Schedule a deferred render at the end of the
-                            // budget window so the final state is always drawn.
-                            entry.render_pending.set(true);
-                            let gl = entry.gl_area.clone();
-                            let delay_ms = ((RENDER_BUDGET_US - elapsed) / 1000 + 1) as u64;
-                            glib::timeout_add_local_once(
-                                Duration::from_millis(delay_ms),
-                                move || {
-                                    SURFACE_MAP.with(|map| {
-                                        if let Some(entry) = map.borrow().get(&surface_key) {
-                                            entry.render_pending.set(false);
-                                            entry.last_render_us.set(now_micros());
-                                        }
-                                    });
-                                    gl.queue_render();
-                                },
-                            );
                         }
                     }
                 });
@@ -860,10 +794,9 @@ pub fn create_terminal(
     let gl_area = gtk::GLArea::new();
     gl_area.set_hexpand(true);
     gl_area.set_vexpand(true);
-    // auto_render=true ensures GTK continuously redraws the GLArea,
-    // which forces its internal FBO to match the current allocation.
-    // With auto_render=false, the FBO may stay at the initial size.
-    gl_area.set_auto_render(true);
+    // With auto_render=false, GTK only draws when queue_render() is called.
+    // This prevents wasted GL draws during text floods.
+    gl_area.set_auto_render(false);
     gl_area.set_focusable(true);
     gl_area.set_can_focus(true);
 
@@ -1075,9 +1008,6 @@ pub fn create_terminal(
                             }
                         })),
                         clipboard_context,
-                        last_render_us: Cell::new(0),
-                        render_pending: Cell::new(false),
-                        resize_pending: Cell::new(false),
                     },
                 );
             });
@@ -1087,6 +1017,9 @@ pub fn create_terminal(
             unsafe {
                 ghostty_surface_set_focus(surface, true);
             }
+
+            // Queue the initial render (required with auto_render=false).
+            gl_area.queue_render();
 
             // Grab GTK focus so key events reach this widget.
             request_terminal_focus(gl_area, &had_focus);

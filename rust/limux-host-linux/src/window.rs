@@ -1087,6 +1087,18 @@ pub fn build_window(app: &adw::Application) {
         });
     }
 
+    // Tick Ghostty once per frame when the renderer signals pending work.
+    // This replaces the old polling timer and idle-callback flooding.
+    {
+        let app = crate::terminal::ghostty_app();
+        window.add_tick_callback(move |_widget, _frame_clock| {
+            if crate::terminal::WAKEUP_PENDING.swap(false, std::sync::atomic::Ordering::Acquire) {
+                unsafe { limux_ghostty_sys::ghostty_app_tick(app) };
+            }
+            glib::ControlFlow::Continue
+        });
+    }
+
     apply_loaded_session(&state, layout_state::load_session());
     window.present();
 }
