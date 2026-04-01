@@ -38,6 +38,19 @@ type DesktopNotificationCallback = dyn Fn(&str, &str);
 type VoidCallback = dyn Fn();
 type WidgetCallback = dyn Fn(&gtk::Widget);
 
+/// Minimum interval between rendered frames per surface (in microseconds).
+/// 16_666 µs ≈ 60 fps. During text floods Ghostty fires render requests much
+/// faster than this; throttling prevents the GL draw from monopolizing the
+/// GTK main thread and freezing the UI.
+const RENDER_BUDGET_US: u128 = 16_666;
+
+fn now_micros() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_micros())
+        .unwrap_or(0)
+}
+
 /// Per-surface state, stored in a global registry keyed by surface pointer.
 struct SurfaceEntry {
     gl_area: gtk::GLArea,
@@ -48,6 +61,12 @@ struct SurfaceEntry {
     on_bell: Option<Box<VoidCallback>>,
     on_close: Option<Box<VoidCallback>>,
     clipboard_context: *mut ClipboardContext,
+    /// Timestamp of the last queued render (monotonic, in µs).
+    last_render_us: Cell<u128>,
+    /// Whether a deferred render is already scheduled.
+    render_pending: Cell<bool>,
+    /// Set by resize handler to bypass throttle on the next render.
+    resize_pending: Cell<bool>,
 }
 
 struct ClipboardContext {
@@ -353,12 +372,9 @@ pub fn init_ghostty() {
 
         let app = unsafe { ghostty_app_new(&runtime_config, config) };
 
-        // Ghostty's GTK apprt calls core_app.tick() on every GLib main
-        // loop iteration to drain the app mailbox (which includes
-        // redraw_surface messages from the renderer thread). The renderer
-        // thread pushes these messages but doesn't wake the app.
-        // We replicate this with a high-frequency timer (~8ms ≈ 120Hz).
-        glib::timeout_add_local(std::time::Duration::from_millis(8), move || {
+        // Fallback timer: tick periodically in case wakeup callbacks are missed.
+        // The wakeup callback handles the normal fast path; this is a safety net.
+        glib::timeout_add_local(std::time::Duration::from_millis(250), move || {
             unsafe { ghostty_app_tick(app) };
             glib::ControlFlow::Continue
         });
@@ -436,11 +452,19 @@ pub fn sync_color_scheme(dark: bool) {
 // Runtime callbacks (C ABI)
 // ---------------------------------------------------------------------------
 
+/// Coalescing flag for wakeup callbacks. Prevents scheduling more than one
+/// idle tick at a time.
+static WAKEUP_PENDING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 unsafe extern "C" fn ghostty_wakeup_cb(_userdata: *mut c_void) {
-    glib::idle_add_once(|| {
-        let app = ghostty_app();
-        unsafe { ghostty_app_tick(app) };
-    });
+    // Schedule exactly one idle tick. If one is already pending, skip.
+    if !WAKEUP_PENDING.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        glib::idle_add_once(|| {
+            let app = ghostty_app();
+            unsafe { ghostty_app_tick(app) };
+            WAKEUP_PENDING.store(false, std::sync::atomic::Ordering::SeqCst);
+        });
+    }
 }
 
 unsafe extern "C" fn ghostty_action_cb(
@@ -456,7 +480,47 @@ unsafe extern "C" fn ghostty_action_cb(
                 let surface_key = unsafe { target.target.surface } as usize;
                 SURFACE_MAP.with(|map| {
                     if let Some(entry) = map.borrow().get(&surface_key) {
-                        entry.gl_area.queue_render();
+                        // Skip hidden surfaces entirely.
+                        if !entry.gl_area.is_mapped() {
+                            return;
+                        }
+
+                        // Always render immediately after a resize so the
+                        // terminal grid redraws at the correct dimensions.
+                        if entry.resize_pending.replace(false) {
+                            entry.last_render_us.set(now_micros());
+                            entry.gl_area.queue_render();
+                            return;
+                        }
+
+                        // Throttle to ~60 fps. During text floods Ghostty fires
+                        // hundreds of render requests per second; each triggers a
+                        // synchronous GL draw that blocks the GTK main thread.
+                        let now = now_micros();
+                        let elapsed = now.saturating_sub(entry.last_render_us.get());
+
+                        if elapsed >= RENDER_BUDGET_US {
+                            entry.last_render_us.set(now);
+                            entry.gl_area.queue_render();
+                        } else if !entry.render_pending.get() {
+                            // Schedule a deferred render at the end of the
+                            // budget window so the final state is always drawn.
+                            entry.render_pending.set(true);
+                            let gl = entry.gl_area.clone();
+                            let delay_ms = ((RENDER_BUDGET_US - elapsed) / 1000 + 1) as u64;
+                            glib::timeout_add_local_once(
+                                Duration::from_millis(delay_ms),
+                                move || {
+                                    SURFACE_MAP.with(|map| {
+                                        if let Some(entry) = map.borrow().get(&surface_key) {
+                                            entry.render_pending.set(false);
+                                            entry.last_render_us.set(now_micros());
+                                        }
+                                    });
+                                    gl.queue_render();
+                                },
+                            );
+                        }
                     }
                 });
             }
@@ -1011,6 +1075,9 @@ pub fn create_terminal(
                             }
                         })),
                         clipboard_context,
+                        last_render_us: Cell::new(0),
+                        render_pending: Cell::new(false),
+                        resize_pending: Cell::new(false),
                     },
                 );
             });
