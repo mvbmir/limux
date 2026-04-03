@@ -202,10 +202,6 @@ impl TerminalShortcutTarget {
         self.handle.perform_binding_action(action)
     }
 
-    pub fn font_size(&self) -> Option<f32> {
-        self.handle.font_size()
-    }
-
     pub fn show_find(&self) -> bool {
         self.handle.show_find()
     }

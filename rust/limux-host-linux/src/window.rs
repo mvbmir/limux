@@ -3764,28 +3764,43 @@ fn dispatch_terminal_command(state: &State, command: ShortcutCommand) -> bool {
         ShortcutCommand::TerminalPaste => target.perform_binding_action("paste_from_clipboard"),
         ShortcutCommand::TerminalIncreaseFontSize => {
             let ok = target.perform_binding_action("increase_font_size:1");
-            persist_font_size(&target);
+            if ok {
+                persist_font_size_delta(1.0);
+            }
             ok
         }
         ShortcutCommand::TerminalDecreaseFontSize => {
             let ok = target.perform_binding_action("decrease_font_size:1");
-            persist_font_size(&target);
+            if ok {
+                persist_font_size_delta(-1.0);
+            }
             ok
         }
         ShortcutCommand::TerminalResetFontSize => {
             let ok = target.perform_binding_action("reset_font_size");
-            persist_font_size(&target);
+            if ok {
+                persist_font_size_reset();
+            }
             ok
         }
         _ => false,
     }
 }
 
-fn persist_font_size(terminal: &pane::TerminalShortcutTarget) {
-    if let Some(size) = terminal.font_size() {
-        if let Err(err) = app_config::save_font_size(size) {
-            eprintln!("limux: {err}");
-        }
+fn persist_font_size_delta(delta: f32) {
+    let current = app_config::load()
+        .config
+        .font_size
+        .unwrap_or_else(crate::terminal::default_font_size);
+    let new_size = (current + delta).clamp(1.0, 255.0);
+    if let Err(err) = app_config::save_font_size(new_size) {
+        eprintln!("limux: {err}");
+    }
+}
+
+fn persist_font_size_reset() {
+    if let Err(err) = app_config::clear_font_size() {
+        eprintln!("limux: {err}");
     }
 }
 
