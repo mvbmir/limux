@@ -165,11 +165,6 @@ impl TerminalHandle {
         surface.is_some()
     }
 
-    pub fn font_size(&self) -> Option<f32> {
-        let surface = (*self.surface_cell.borrow())?;
-        Some(unsafe { ghostty_surface_font_size(surface) })
-    }
-
     /// Inject text into the terminal surface for control-socket requests and
     /// drag/drop payloads. Ghostty treats this as pasted text, which matches
     /// the current control protocol semantics.
@@ -818,6 +813,13 @@ pub struct TerminalOptions {
     pub saved_font_size: Option<f32>,
 }
 
+/// Default font-size from ghostty config (cached on first access).
+pub(crate) fn default_font_size() -> f32 {
+    use std::sync::OnceLock;
+    static SIZE: OnceLock<f32> = OnceLock::new();
+    *SIZE.get_or_init(crate::ghostty_config::read_font_size)
+}
+
 /// Create a new Ghostty-powered terminal widget.
 /// Returns an Overlay (GLArea + toast layer) for embedding in the pane.
 pub fn create_terminal(
@@ -973,10 +975,6 @@ pub fn create_terminal(
             config.scale_factor = scale;
             config.context = GHOSTTY_SURFACE_CONTEXT_WINDOW;
 
-            if let Some(size) = saved_font_size {
-                config.font_size = size;
-            }
-
             let c_wd = wd.as_ref().and_then(|s| CString::new(s.as_str()).ok());
             if let Some(ref cwd) = c_wd {
                 config.working_directory = cwd.as_ptr();
@@ -995,6 +993,18 @@ pub fn create_terminal(
                 ghostty_surface_set_color_scheme(surface, current_ghostty_color_scheme());
             }
             clipboard_context_cell.set(clipboard_context);
+
+            // Apply saved font size (if different from ghostty default)
+            if let Some(size) = saved_font_size {
+                let action = format!("set_font_size:{size}");
+                unsafe {
+                    ghostty_surface_binding_action(
+                        surface,
+                        action.as_ptr() as *const c_char,
+                        action.len(),
+                    );
+                }
+            }
 
             // Set initial size — GLArea gives unscaled CSS pixels,
             // Ghostty handles scaling internally via content_scale.

@@ -153,7 +153,7 @@ fn parse_app_config_value(root: &Value) -> AppConfig {
         .get("font_size")
         .and_then(Value::as_f64)
         .map(|v| v as f32)
-        .filter(|&v| v >= 1.0 && v <= 255.0);
+        .filter(|v| (1.0..=255.0).contains(v));
 
     AppConfig {
         focus: FocusConfig {
@@ -200,6 +200,22 @@ fn save_to_path(path: &Path, config: &AppConfig) -> Result<(), String> {
     let serialized =
         serde_json::to_string_pretty(&Value::Object(root)).expect("config should serialize");
     write_config_root_atomically(path, &serialized)
+}
+
+pub fn clear_font_size() -> Result<(), String> {
+    let Some(path) = settings_path() else {
+        return Err("config_dir unavailable; cannot clear font size".to_string());
+    };
+
+    let mut root = read_existing_config_root_for_save(&path)
+        .map_err(|err| format!("failed to clear font size in `{}`: {err}", path.display()))?;
+
+    root.remove("font_size");
+
+    let serialized =
+        serde_json::to_string_pretty(&Value::Object(root)).expect("config should serialize");
+    write_config_root_atomically(&path, &serialized)
+        .map_err(|err| format!("failed to clear font size in `{}`: {err}", path.display()))
 }
 
 pub fn save_font_size(font_size: f32) -> Result<(), String> {
