@@ -1,4 +1,4 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use gtk::glib;
@@ -375,12 +375,17 @@ fn build_widget_tree(node: &SplitNode, state: &State) -> gtk::Widget {
             update_split_ratio_state(&paned, ratio_val);
             attach_split_position_persistence(state, &paned);
 
+            // Flag to suppress position_notify during programmatic set_position calls
+            // (initial layout and workspace re-map). Without this, set_position triggers
+            // position_notify which recalculates the ratio from the not-yet-stable pixel
+            // position, corrupting the stored ratio.
+            let applying = Rc::new(Cell::new(false));
+
             // Wire resize drags back to the shared ratio cell in the data model.
-            // Guard: skip when the paned is unmapped (workspace hidden) to prevent
-            // stale position events from corrupting the ratio during workspace switches.
             let shared_ratio = ratio.clone();
+            let applying_for_notify = applying.clone();
             paned.connect_position_notify(move |paned| {
-                if !paned.is_mapped() {
+                if applying_for_notify.get() || !paned.is_mapped() {
                     return;
                 }
                 let allocation = paned.allocation();
@@ -402,7 +407,7 @@ fn build_widget_tree(node: &SplitNode, state: &State) -> gtk::Widget {
             paned.set_start_child(Some(&left_widget));
             paned.set_end_child(Some(&right_widget));
 
-            apply_split_ratio_after_layout(&paned, *orientation, ratio_val);
+            apply_split_ratio_after_layout(&paned, *orientation, ratio.clone(), applying);
 
             paned.upcast()
         }
