@@ -375,9 +375,14 @@ fn build_widget_tree(node: &SplitNode, state: &State) -> gtk::Widget {
             update_split_ratio_state(&paned, ratio_val);
             attach_split_position_persistence(state, &paned);
 
-            // Wire resize drags back to the shared ratio cell in the data model
+            // Wire resize drags back to the shared ratio cell in the data model.
+            // Guard: skip when the paned is unmapped (workspace hidden) to prevent
+            // stale position events from corrupting the ratio during workspace switches.
             let shared_ratio = ratio.clone();
             paned.connect_position_notify(move |paned| {
+                if !paned.is_mapped() {
+                    return;
+                }
                 let allocation = paned.allocation();
                 let size = if paned.orientation() == gtk::Orientation::Horizontal {
                     allocation.width()
