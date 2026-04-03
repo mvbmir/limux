@@ -461,13 +461,13 @@ fn build_workspace_root(
     (root, container)
 }
 
-fn apply_ratio_inner(
+fn apply_ratio_value(
     paned: &gtk::Paned,
     orientation: gtk::Orientation,
-    ratio_cell: &Rc<RefCell<f64>>,
+    ratio: f64,
     applying: &Rc<Cell<bool>>,
 ) -> bool {
-    let ratio = layout_state::clamp_split_ratio(*ratio_cell.borrow());
+    let ratio = layout_state::clamp_split_ratio(ratio);
     let allocation = paned.allocation();
     let size = if orientation == gtk::Orientation::Horizontal {
         allocation.width()
@@ -490,23 +490,27 @@ pub(crate) fn apply_split_ratio_after_layout(
     ratio_cell: Rc<RefCell<f64>>,
     applying: Rc<Cell<bool>>,
 ) {
+    // Capture the ratio by value for the initial idle callback so that early
+    // position_notify events (which may corrupt the cell) don't affect it.
+    let initial_ratio = *ratio_cell.borrow();
+
     let paned_for_idle = paned.clone();
-    let ratio_for_idle = ratio_cell.clone();
     let applying_for_idle = applying.clone();
     glib::idle_add_local_once(move || {
-        apply_ratio_inner(
+        apply_ratio_value(
             &paned_for_idle,
             orientation,
-            &ratio_for_idle,
+            initial_ratio,
             &applying_for_idle,
         );
     });
 
     let paned_for_map = paned.clone();
-    // Re-apply the current data model ratio on every map event (including workspace switches).
-    // The applying flag suppresses position_notify so the re-application doesn't corrupt the ratio.
+    // Re-apply the current data model ratio on every map event (workspace switches).
+    // Reads from the cell so drag-adjusted ratios are restored correctly.
     paned.connect_map(move |_| {
-        apply_ratio_inner(&paned_for_map, orientation, &ratio_cell, &applying);
+        let ratio = *ratio_cell.borrow();
+        apply_ratio_value(&paned_for_map, orientation, ratio, &applying);
     });
 }
 
