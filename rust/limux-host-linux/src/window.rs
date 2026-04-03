@@ -488,10 +488,15 @@ pub(crate) fn apply_split_ratio_after_layout(
     });
 
     let paned_for_map = paned.clone();
+    let applied = Rc::new(Cell::new(false));
     // Hidden workspaces may not have a real allocation during initial restore, so retry when the
     // split is actually mapped instead of collapsing the divider to an arbitrary fallback pixel.
+    // Only apply once: subsequent map events (workspace switches) must not overwrite user-adjusted
+    // positions with the stale ratio captured at build time.
     paned.connect_map(move |_| {
-        let _ = apply_ratio(&paned_for_map);
+        if !applied.get() && apply_ratio(&paned_for_map) {
+            applied.set(true);
+        }
     });
 }
 
