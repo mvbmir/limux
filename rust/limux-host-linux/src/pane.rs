@@ -286,24 +286,25 @@ pub const PANE_CSS: &str = r#"
 .limux-tab-close {
     background: none;
     border: none;
-    border-radius: 3px;
-    padding: 1px;
+    border-radius: 6px;
+    padding: 2px;
     min-height: 0;
     min-width: 0;
+    margin: 0 0 0 4px;
     color: alpha(@window_fg_color, 0.28);
-    margin-left: 4px;
 }
 .limux-tab-close:hover {
     color: alpha(@window_fg_color, 0.8);
-    background: alpha(@window_fg_color, 0.1);
+    background: alpha(@window_fg_color, 0.08);
 }
 .limux-pane-action {
     background: none;
     border: none;
-    border-radius: 4px;
-    padding: 4px 5px;
+    border-radius: 6px;
+    padding: 4px;
     min-height: 0;
     min-width: 0;
+    margin: 0 1px;
     color: alpha(@window_fg_color, 0.4);
 }
 .limux-pane-action:hover {
@@ -402,12 +403,23 @@ pub fn create_pane(
     tab_overlay.add_css_class("limux-tab-overlay");
     tab_overlay.set_hexpand(true);
 
+    // tab_strip holds the actual tab buttons (natural width). A WindowHandle
+    // sibling to its right soaks up the remaining space and drags the window
+    // when clicked, so the empty area after the last tab is also draggable.
     let tab_strip = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .spacing(0)
+        .build();
+    let tab_drag_filler = gtk::WindowHandle::new();
+    tab_drag_filler.set_hexpand(true);
+    let tab_strip_wrapper = gtk::Box::builder()
         .orientation(gtk::Orientation::Horizontal)
         .spacing(0)
         .hexpand(true)
         .build();
-    tab_overlay.set_child(Some(&tab_strip));
+    tab_strip_wrapper.append(&tab_strip);
+    tab_strip_wrapper.append(&tab_drag_filler);
+    tab_overlay.set_child(Some(&tab_strip_wrapper));
 
     let drop_indicator = gtk::Box::new(gtk::Orientation::Vertical, 0);
     drop_indicator.add_css_class("limux-tab-drop-indicator");
@@ -614,6 +626,38 @@ pub fn cycle_tab_in_pane(pane_widget: &gtk::Widget, delta: i32) {
     (internals.callbacks.on_state_changed)();
 }
 
+/// Close the currently active tab in the given pane. If this was the last tab,
+/// the pane is closed via the `on_empty` callback.
+pub fn close_active_tab_in_pane(pane_widget: &gtk::Widget) {
+    let Some(outer) = pane_widget.downcast_ref::<gtk::Box>() else {
+        return;
+    };
+    let internals: Rc<PaneInternals> = unsafe {
+        match outer.data::<Rc<PaneInternals>>("limux-pane-internals") {
+            Some(ptr) => ptr.as_ref().clone(),
+            None => return,
+        }
+    };
+
+    let active_id = {
+        let ts = internals.tab_state.borrow();
+        ts.active_tab.clone()
+    };
+    let Some(tab_id) = active_id else {
+        return;
+    };
+
+    remove_tab(
+        &internals.tab_strip,
+        &internals.content_stack,
+        &internals.tab_state,
+        &tab_id,
+        &internals.callbacks,
+        outer,
+        PaneEmptyReason::ClosedLastTab,
+    );
+}
+
 pub fn focus_active_tab_in_pane(pane_widget: &gtk::Widget) -> bool {
     let Some(internals) = find_pane_internals(pane_widget) else {
         return false;
@@ -742,6 +786,7 @@ fn icon_button(icon_name: &str, tooltip: &str) -> gtk::Button {
         .icon_name(icon_name)
         .tooltip_text(tooltip)
         .has_frame(false)
+        .valign(gtk::Align::Center)
         .build();
     btn.add_css_class("limux-pane-action");
     btn
@@ -1391,6 +1436,15 @@ pub fn is_pane_widget(widget: &gtk::Widget) -> bool {
         if current.has_css_class("limux-pane-header") {
             return true;
         }
+        // The header can be wrapped in a WindowHandle (used so empty space in
+        // the header drags the window); look through it for the real header.
+        if let Some(handle) = current.downcast_ref::<gtk::WindowHandle>() {
+            if let Some(inner) = handle.child() {
+                if inner.has_css_class("limux-pane-header") {
+                    return true;
+                }
+            }
+        }
         child = current.next_sibling();
     }
 
@@ -1526,6 +1580,7 @@ fn build_tab_button_from_label(
     let close_btn = gtk::Button::builder()
         .icon_name("window-close-symbolic")
         .has_frame(false)
+        .valign(gtk::Align::Center)
         .build();
     close_btn.add_css_class("limux-tab-close");
 
@@ -1573,6 +1628,31 @@ fn build_tab_button_from_label(
         });
     }
     tab_btn.add_controller(right_click);
+
+    // Middle-click to close the tab.
+    let middle_click = gtk::GestureClick::new();
+    middle_click.set_button(2);
+    {
+        let tab_id = tab_id.to_string();
+        let tab_strip = internals.tab_strip.clone();
+        let content_stack = internals.content_stack.clone();
+        let tab_state = internals.tab_state.clone();
+        let callbacks = internals.callbacks.clone();
+        let pane_outer = internals.pane_outer.clone();
+        middle_click.connect_pressed(move |gesture, _, _, _| {
+            gesture.set_state(gtk::EventSequenceState::Claimed);
+            remove_tab(
+                &tab_strip,
+                &content_stack,
+                &tab_state,
+                &tab_id,
+                &callbacks,
+                &pane_outer,
+                PaneEmptyReason::ClosedLastTab,
+            );
+        });
+    }
+    tab_btn.add_controller(middle_click);
 
     let drag_source = gtk::DragSource::new();
     drag_source.set_actions(gtk::gdk::DragAction::MOVE);

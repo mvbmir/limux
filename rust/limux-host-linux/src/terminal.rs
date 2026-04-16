@@ -620,22 +620,9 @@ unsafe extern "C" fn ghostty_action_cb(
             true
         }
         GHOSTTY_ACTION_CONFIG_CHANGE => {
-            let config = unsafe { action.action.config_change.config };
-            if !config.is_null() {
-                match target.tag {
-                    GHOSTTY_TARGET_APP => unsafe {
-                        ghostty_app_update_config(app, config);
-                    },
-                    GHOSTTY_TARGET_SURFACE => {
-                        let surface = unsafe { target.target.surface };
-                        unsafe {
-                            ghostty_surface_update_config(surface, config);
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            // Do not free config — owned by Ghostty core
+            // Intentional no-op: forwarding the config back into
+            // ghostty_*_update_config re-enters this callback and recurses.
+            // The config is owned by Ghostty core; nothing to free here.
             true
         }
         _ => false,

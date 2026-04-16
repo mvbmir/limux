@@ -53,12 +53,16 @@ struct Workspace {
     /// Path label shown below workspace name in sidebar.
     #[allow(dead_code)]
     path_label: gtk::Label,
+    /// The workspace indicator pill in the top bar.
+    indicator_button: gtk::Button,
+    /// The unread dot inside the indicator pill.
+    indicator_unread_dot: gtk::Label,
 }
 
 pub(crate) struct AppState {
     app: adw::Application,
     window: adw::ApplicationWindow,
-    top_bar: Option<adw::HeaderBar>,
+    top_bar: Option<gtk::WindowHandle>,
     top_bar_visible: bool,
     config: Rc<RefCell<app_config::AppConfig>>,
     system_prefers_dark: Rc<Cell<Option<bool>>>,
@@ -69,6 +73,7 @@ pub(crate) struct AppState {
     sidebar_list: gtk::ListBox,
     paned: gtk::Paned,
     new_ws_btn: gtk::Button,
+    indicator_box: gtk::Box,
     sidebar_animation: Option<adw::TimedAnimation>,
     sidebar_animation_epoch: u64,
     sidebar_expanded_width: i32,
@@ -580,39 +585,164 @@ const BASE_CSS: &str = r#"
 .limux-host-entry image {
     color: var(--limux-host-entry-placeholder);
 }
+
+/* ---------- Top bar (matches pane header height/typography) ---------- */
+.limux-top-bar {
+    background-color: @window_bg_color;
+    border-bottom: 1px solid alpha(@window_fg_color, 0.08);
+    min-height: 30px;
+    padding: 0 4px;
+}
+.limux-top-bar-btn {
+    background: none;
+    border: none;
+    border-radius: 6px;
+    padding: 4px;
+    min-height: 0;
+    min-width: 0;
+    margin: 0 1px;
+    color: alpha(@window_fg_color, 0.4);
+}
+.limux-top-bar-btn:hover {
+    background: alpha(@window_fg_color, 0.08);
+    color: alpha(@window_fg_color, 0.8);
+}
+.limux-top-bar-close {
+    border-radius: 8px;
+    margin: 0 2px 0 1px;
+}
+.limux-top-bar-close:hover {
+    background: alpha(#e81123, 0.85);
+    color: #ffffff;
+}
+.limux-indicator-box {
+    margin: 0 4px;
+}
+.limux-indicator-pill {
+    background: transparent;
+    color: alpha(@window_fg_color, 0.5);
+    border: none;
+    border-radius: 4px;
+    padding: 2px 10px;
+    min-height: 0;
+    min-width: 0;
+    font-size: 12px;
+    font-weight: 500;
+    transition: all 120ms ease;
+}
+.limux-indicator-pill:hover {
+    background: alpha(@window_fg_color, 0.06);
+    color: alpha(@window_fg_color, 0.75);
+}
+.limux-indicator-pill-active {
+    background: alpha(@window_fg_color, 0.1);
+    color: @window_fg_color;
+    font-weight: 600;
+}
+.limux-indicator-pill-active:hover {
+    background: alpha(@window_fg_color, 0.14);
+}
+.limux-indicator-pill-unread {
+    color: @window_fg_color;
+    font-weight: 600;
+}
+.limux-indicator-unread-dot {
+    color: @accent_bg_color;
+    font-size: 7px;
+    margin-right: 4px;
+}
+.limux-indicator-unread-dot-hidden {
+    font-size: 7px;
+    margin-right: 0;
+    min-width: 0;
+}
+
+/* ---------- Sidebar ---------- */
 .limux-sidebar {
     background-color: @window_bg_color;
     color: @window_fg_color;
-    border-right: 1px solid alpha(@window_fg_color, 0.08);
+    border-right: 1px solid alpha(@window_fg_color, 0.06);
+}
+.limux-sidebar-list {
+    background: transparent;
+}
+/* Strip default ListBox row selection styling; we paint the inner row box instead. */
+.limux-sidebar-list row,
+.limux-sidebar-list row:selected,
+.limux-sidebar-list row:selected:hover,
+.limux-sidebar-list row:focus,
+.limux-sidebar-list row:focus:focus-visible {
+    background: transparent;
+    box-shadow: none;
+    outline: none;
 }
 .limux-sidebar-row-box {
-    padding: 8px 6px 8px 3px;
-    border-radius: 6px;
-    margin: 2px 3px 2px 1px;
+    padding: 8px 10px 8px 10px;
+    border-radius: 8px;
+    margin: 1px 6px;
+}
+.limux-sidebar-list row:hover .limux-sidebar-row-box {
+    background: alpha(@window_fg_color, 0.05);
+}
+.limux-sidebar-list row:selected .limux-sidebar-row-box {
+    background: alpha(@accent_bg_color, 0.14);
 }
 .limux-ws-name {
-    color: alpha(@window_fg_color, 0.72);
-    font-size: 15px;
+    color: alpha(@window_fg_color, 0.65);
+    font-size: 13px;
+    font-weight: 500;
 }
-row:selected .limux-ws-name {
+.limux-sidebar-list row:selected .limux-ws-name {
     color: @window_fg_color;
+    font-weight: 600;
 }
 .limux-ws-star-btn {
-    color: alpha(@window_fg_color, 0.45);
+    background: transparent;
+    color: alpha(@window_fg_color, 0.3);
     border: none;
     min-height: 0;
     min-width: 0;
     padding: 0 4px;
-    font-size: 22px;
+    font-size: 14px;
+    opacity: 0;
+    transition: opacity 150ms ease;
+}
+.limux-sidebar-list row:hover .limux-ws-star-btn,
+.limux-sidebar-list row:selected .limux-ws-star-btn {
+    opacity: 1;
 }
 .limux-ws-star-btn:hover {
     color: alpha(@window_fg_color, 0.9);
 }
-row:selected .limux-ws-star-btn {
-    color: alpha(@window_fg_color, 0.85);
+.limux-sidebar-list row:selected .limux-ws-star-btn {
+    color: alpha(@window_fg_color, 0.6);
 }
 .limux-ws-star-btn-active {
     color: @accent_bg_color;
+    opacity: 1;
+}
+
+/* Workspace row close X — visible on hover/selected */
+.limux-ws-close-btn {
+    background: transparent;
+    color: alpha(@window_fg_color, 0.35);
+    border: none;
+    border-radius: 4px;
+    min-height: 0;
+    min-width: 0;
+    padding: 2px;
+    margin: 0;
+    opacity: 0;
+    -gtk-icon-size: 12px;
+    transition: opacity 150ms ease;
+}
+.limux-sidebar-list row:hover .limux-ws-close-btn,
+.limux-sidebar-list row:selected .limux-ws-close-btn {
+    opacity: 1;
+}
+.limux-ws-close-btn:hover {
+    background: alpha(@window_fg_color, 0.1);
+    color: @window_fg_color;
 }
 .limux-ws-rename-entry {
     min-height: 0;
@@ -621,32 +751,31 @@ row:selected .limux-ws-star-btn {
 }
 .limux-notify-dot {
     color: @accent_bg_color;
-    font-size: 10px;
+    font-size: 8px;
     margin-right: 6px;
 }
 .limux-notify-dot-hidden {
     color: transparent;
-    font-size: 10px;
+    font-size: 8px;
     margin-right: 6px;
 }
 .limux-notify-msg {
-    color: alpha(@window_fg_color, 0.35);
+    color: alpha(@window_fg_color, 0.3);
     font-size: 11px;
 }
 .limux-notify-msg-unread {
-    color: alpha(@accent_bg_color, 0.9);
+    color: alpha(@accent_bg_color, 0.85);
     font-size: 11px;
 }
 .limux-sidebar-row-unread {
-    background-color: alpha(@accent_bg_color, 0.16);
+    background-color: alpha(@accent_bg_color, 0.1);
     border-left: 3px solid @accent_bg_color;
-    border-radius: 6px;
-    margin-left: 0;
-    margin-right: 0;
+    border-radius: 8px;
+    margin-left: 3px;
 }
 .limux-sidebar-row-unread .limux-ws-name {
     color: @window_fg_color;
-    font-weight: 700;
+    font-weight: 600;
 }
 .limux-drop-above .limux-sidebar-row-box {
     border-radius: 0;
@@ -663,24 +792,19 @@ row:selected .limux-ws-star-btn {
 .limux-sidebar row:drop(active) {
     box-shadow: none;
 }
-.limux-sidebar-title {
-    color: alpha(@window_fg_color, 0.55);
-    font-size: 11px;
-    font-weight: 600;
-    letter-spacing: 1px;
-}
 .limux-sidebar-btn {
-    background: alpha(@window_fg_color, 0.08);
-    color: alpha(@window_fg_color, 0.7);
+    background: alpha(@window_fg_color, 0.06);
+    color: alpha(@window_fg_color, 0.5);
     border: 1px solid transparent;
-    border-radius: 6px;
+    border-radius: 8px;
     padding: 6px 12px;
     min-height: 0;
+    font-size: 18px;
     transition: all 200ms ease;
 }
 .limux-sidebar-btn:hover {
-    background: alpha(@window_fg_color, 0.14);
-    color: @window_fg_color;
+    background: alpha(@window_fg_color, 0.1);
+    color: alpha(@window_fg_color, 0.8);
 }
 .limux-sidebar-btn-trash {
     background: alpha(@error_color, 0.16);
@@ -705,10 +829,10 @@ row:selected .limux-ws-star-btn {
 }
 .limux-ws-path {
     color: alpha(@window_fg_color, 0.3);
-    font-size: 12px;
+    font-size: 11px;
 }
-row:selected .limux-ws-path {
-    color: alpha(@window_fg_color, 0.5);
+.limux-sidebar-list row:selected .limux-ws-path {
+    color: alpha(@window_fg_color, 0.45);
 }
 .limux-content {
     background-color: @window_bg_color;
@@ -798,23 +922,99 @@ pub fn build_window(app: &adw::Application) {
         .build();
     apply_window_background_class(&window, background_opacity);
 
-    // On Wayland compositors with xdg-decoration support, the compositor
-    // already provides the window chrome, so keep Limux from rendering a
-    // duplicate header bar. X11 continues to use the in-app header.
-    let provides_decorations = display
-        .clone()
-        .downcast::<gdk4_wayland::WaylandDisplay>()
-        .ok()
-        .map(|display| display.query_registry("zxdg_decoration_manager_v1"))
-        .unwrap_or(false);
+    // Workspace indicator pill container (shared between header and state)
+    let indicator_box = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .spacing(2)
+        .halign(gtk::Align::Start)
+        .valign(gtk::Align::Center)
+        .hexpand(true)
+        .build();
+    indicator_box.add_css_class("limux-indicator-box");
 
-    let header = if provides_decorations {
-        None
-    } else {
-        let bar = adw::HeaderBar::new();
-        bar.set_title_widget(Some(&gtk::Label::builder().label(&title).build()));
-        Some(bar)
-    };
+    let top_bar_sidebar_toggle: gtk::Button;
+    let top_bar_new_ws_btn: gtk::Button;
+
+    // The top bar itself is a WindowHandle so empty space drags the window,
+    // while child buttons (sidebar toggle, workspace pills, +) stay clickable.
+    let top_bar_content = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .spacing(0)
+        .build();
+    top_bar_content.add_css_class("limux-top-bar");
+
+    // Sidebar toggle button (leftmost) — Adwaita sidebar icon
+    let sidebar_toggle = gtk::Button::from_icon_name("sidebar-show-symbolic");
+    sidebar_toggle.add_css_class("flat");
+    sidebar_toggle.add_css_class("limux-top-bar-btn");
+    sidebar_toggle.set_focus_on_click(false);
+    sidebar_toggle.set_valign(gtk::Align::Center);
+    sidebar_toggle.set_tooltip_text(Some("Toggle sidebar"));
+    top_bar_content.append(&sidebar_toggle);
+    top_bar_sidebar_toggle = sidebar_toggle;
+
+    // New workspace button, right next to the sidebar toggle
+    let new_ws = gtk::Button::from_icon_name("list-add-symbolic");
+    new_ws.add_css_class("flat");
+    new_ws.add_css_class("limux-top-bar-btn");
+    new_ws.set_focus_on_click(false);
+    new_ws.set_valign(gtk::Align::Center);
+    new_ws.set_tooltip_text(Some("New workspace"));
+    top_bar_content.append(&new_ws);
+    top_bar_new_ws_btn = new_ws;
+
+    // Workspace indicator pills (takes the rest of the space)
+    top_bar_content.append(&indicator_box);
+
+    // Window controls on the right — plain buttons styled the same as top-bar
+    // action buttons so hover shape matches the pane bar exactly. We skip the
+    // stock gtk::WindowControls widget because Adwaita forces circular 24px
+    // bubbles that are hard to override cleanly.
+    let minimize_btn = gtk::Button::from_icon_name("window-minimize-symbolic");
+    minimize_btn.add_css_class("flat");
+    minimize_btn.add_css_class("limux-top-bar-btn");
+    minimize_btn.set_focus_on_click(false);
+    minimize_btn.set_valign(gtk::Align::Center);
+    minimize_btn.set_tooltip_text(Some("Minimize"));
+    top_bar_content.append(&minimize_btn);
+
+    let maximize_btn = gtk::Button::from_icon_name("window-maximize-symbolic");
+    maximize_btn.add_css_class("flat");
+    maximize_btn.add_css_class("limux-top-bar-btn");
+    maximize_btn.set_focus_on_click(false);
+    maximize_btn.set_valign(gtk::Align::Center);
+    maximize_btn.set_tooltip_text(Some("Maximize"));
+    top_bar_content.append(&maximize_btn);
+
+    let close_btn = gtk::Button::from_icon_name("window-close-symbolic");
+    close_btn.add_css_class("flat");
+    close_btn.add_css_class("limux-top-bar-btn");
+    close_btn.add_css_class("limux-top-bar-close");
+    close_btn.set_focus_on_click(false);
+    close_btn.set_valign(gtk::Align::Center);
+    close_btn.set_tooltip_text(Some("Close"));
+    top_bar_content.append(&close_btn);
+
+    {
+        let w = window.clone();
+        minimize_btn.connect_clicked(move |_| w.minimize());
+    }
+    {
+        let w = window.clone();
+        maximize_btn.connect_clicked(move |_| {
+            if gtk::prelude::GtkWindowExt::is_maximized(&w) {
+                w.unmaximize();
+            } else {
+                w.maximize();
+            }
+        });
+    }
+    {
+        let w = window.clone();
+        close_btn.connect_clicked(move |_| w.close());
+    }
+
+    let header = gtk::WindowHandle::builder().child(&top_bar_content).build();
 
     let stack = gtk::Stack::new();
     stack.set_transition_type(gtk::StackTransitionType::None);
@@ -824,7 +1024,7 @@ pub fn build_window(app: &adw::Application) {
 
     let sidebar_list = gtk::ListBox::new();
     sidebar_list.set_selection_mode(gtk::SelectionMode::Single);
-    sidebar_list.add_css_class("navigation-sidebar");
+    sidebar_list.add_css_class("limux-sidebar-list");
 
     let sidebar_scroll = gtk::ScrolledWindow::builder()
         .hscrollbar_policy(gtk::PolicyType::Never)
@@ -833,25 +1033,14 @@ pub fn build_window(app: &adw::Application) {
         .child(&sidebar_list)
         .build();
 
-    let sidebar_title_label = gtk::Label::builder()
-        .label("WORKSPACES")
-        .xalign(0.0)
-        .hexpand(true)
-        .margin_start(12)
-        .build();
-    sidebar_title_label.add_css_class("limux-sidebar-title");
-
-    let sidebar_title = gtk::Box::builder()
+    // Draggable spacer at the top of the sidebar (for window move)
+    let sidebar_drag_area = gtk::Box::builder()
         .orientation(gtk::Orientation::Horizontal)
-        .margin_top(8)
-        .margin_bottom(4)
-        .margin_end(6)
+        .height_request(8)
         .build();
-    sidebar_title.append(&sidebar_title_label);
-
     {
         let window = window.clone();
-        let drag_title = sidebar_title.clone();
+        let drag_area = sidebar_drag_area.clone();
         let drag = gtk::GestureClick::new();
         drag.set_button(1);
         drag.connect_pressed(move |gesture, _, x, y| {
@@ -860,14 +1049,14 @@ pub fn build_window(app: &adw::Application) {
             };
             let button = gesture.current_button() as i32;
             let timestamp = gesture.current_event_time();
-            begin_window_move_from_widget(&drag_title, &window, &device, button, x, y, timestamp);
+            begin_window_move_from_widget(&drag_area, &window, &device, button, x, y, timestamp);
             gesture.set_state(gtk::EventSequenceState::Claimed);
         });
-        sidebar_title.add_controller(drag);
+        sidebar_drag_area.add_controller(drag);
     }
 
     let new_ws_btn = gtk::Button::builder()
-        .label("New Workspace")
+        .label("+")
         .hexpand(true)
         .margin_start(6)
         .margin_end(6)
@@ -898,15 +1087,20 @@ pub fn build_window(app: &adw::Application) {
     }
     new_ws_btn.add_controller(btn_drop.clone());
 
+    // new_ws_btn is kept in state as the drop target for workspace/tab DnD,
+    // but we hide it from the sidebar — the "+" in the top bar creates
+    // workspaces, and closing/creating via drag lands on sidebar rows / the
+    // top bar add button.
+    new_ws_btn.set_visible(false);
+
     let sidebar = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
-        .spacing(4)
+        .spacing(0)
         .width_request(220)
         .build();
     sidebar.add_css_class("limux-sidebar");
-    sidebar.append(&sidebar_title);
+    sidebar.append(&sidebar_drag_area);
     sidebar.append(&sidebar_scroll);
-    sidebar.append(&new_ws_btn);
 
     let main_paned = gtk::Paned::builder()
         .orientation(gtk::Orientation::Horizontal)
@@ -920,16 +1114,14 @@ pub fn build_window(app: &adw::Application) {
         .build();
 
     let vbox = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    if let Some(ref header) = header {
-        vbox.append(header);
-    }
+    vbox.append(&header);
     vbox.append(&main_paned);
     window.set_content(Some(&vbox));
 
     let state: State = Rc::new(RefCell::new(AppState {
         app: app.clone(),
         window: window.clone(),
-        top_bar: header.clone(),
+        top_bar: Some(header.clone()),
         top_bar_visible: true,
         config,
         system_prefers_dark: system_prefers_dark.clone(),
@@ -937,6 +1129,7 @@ pub fn build_window(app: &adw::Application) {
         active_idx: 0,
         shortcuts,
         stack: stack.clone(),
+        indicator_box: indicator_box.clone(),
         sidebar_list: sidebar_list.clone(),
         paned: main_paned.clone(),
         new_ws_btn: new_ws_btn.clone(),
@@ -1062,6 +1255,22 @@ pub fn build_window(app: &adw::Application) {
         });
     }
 
+    // Wire top bar sidebar toggle button
+    {
+        let state = state.clone();
+        top_bar_sidebar_toggle.connect_clicked(move |_| {
+            toggle_sidebar(&state);
+        });
+    }
+
+    // Wire top bar new workspace button
+    {
+        let state = state.clone();
+        top_bar_new_ws_btn.connect_clicked(move |_| {
+            add_workspace(&state, None);
+        });
+    }
+
     {
         let btn = new_ws_btn.clone();
         pane::on_tab_drag_change(move |dragging| {
@@ -1078,7 +1287,7 @@ pub fn build_window(app: &adw::Application) {
         let state = state.clone();
         let btn = new_ws_btn.clone();
         btn_drop.connect_drop(move |_, value, _, _| {
-            btn.set_label("New Workspace");
+            btn.set_label("+");
             btn.remove_css_class("limux-sidebar-btn-trash");
             btn.remove_css_class("limux-sidebar-btn-trash-hover");
             btn.remove_css_class("limux-tab-drop-target");
@@ -1888,6 +2097,81 @@ fn activate_last_workspace_shortcut(state: &State) {
 }
 
 // ---------------------------------------------------------------------------
+// Workspace indicator pill (top bar)
+// ---------------------------------------------------------------------------
+
+fn build_workspace_indicator(name: &str) -> (gtk::Button, gtk::Label) {
+    let unread_dot = gtk::Label::builder()
+        .label("\u{25CF}")
+        .visible(false)
+        .build();
+    unread_dot.add_css_class("limux-indicator-unread-dot-hidden");
+
+    let label = gtk::Label::builder()
+        .label(name)
+        .ellipsize(gtk::pango::EllipsizeMode::End)
+        .max_width_chars(20)
+        .build();
+
+    let content = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .spacing(0)
+        .halign(gtk::Align::Center)
+        .valign(gtk::Align::Center)
+        .build();
+    content.append(&unread_dot);
+    content.append(&label);
+
+    let button = gtk::Button::builder()
+        .child(&content)
+        .focus_on_click(false)
+        .build();
+    button.add_css_class("flat");
+    button.add_css_class("limux-indicator-pill");
+
+    (button, unread_dot)
+}
+
+fn sync_indicator_active_state(state: &AppState) {
+    for (idx, ws) in state.workspaces.iter().enumerate() {
+        if idx == state.active_idx {
+            ws.indicator_button
+                .add_css_class("limux-indicator-pill-active");
+        } else {
+            ws.indicator_button
+                .remove_css_class("limux-indicator-pill-active");
+        }
+    }
+}
+
+fn update_indicator_label(button: &gtk::Button, name: &str) {
+    if let Some(content) = button.child() {
+        if let Some(content_box) = content.downcast_ref::<gtk::Box>() {
+            let mut child = content_box.first_child();
+            while let Some(widget) = child {
+                if let Some(label) = widget.downcast_ref::<gtk::Label>() {
+                    // Skip the unread dot label (it has the dot character)
+                    if label.label() != "\u{25CF}" {
+                        label.set_label(name);
+                        break;
+                    }
+                }
+                child = widget.next_sibling();
+            }
+        }
+    }
+}
+
+fn sync_indicator_order(state: &mut AppState) {
+    while let Some(child) = state.indicator_box.first_child() {
+        state.indicator_box.remove(&child);
+    }
+    for ws in &state.workspaces {
+        state.indicator_box.append(&ws.indicator_button);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Sidebar row
 // ---------------------------------------------------------------------------
 
@@ -1901,6 +2185,7 @@ fn build_sidebar_row(
     gtk::Label,
     gtk::Label,
     gtk::Label,
+    gtk::Button,
 ) {
     let notify_dot = gtk::Label::builder().label("\u{25CF}").build();
     notify_dot.add_css_class("limux-notify-dot-hidden");
@@ -1913,6 +2198,35 @@ fn build_sidebar_row(
         .build();
     name_label.add_css_class("limux-ws-name");
 
+    // Close X in the top-right of the row, replaces where the star used to be.
+    let close_button = gtk::Button::from_icon_name("window-close-symbolic");
+    close_button.add_css_class("flat");
+    close_button.add_css_class("limux-ws-close-btn");
+    close_button.set_focus_on_click(false);
+    close_button.set_valign(gtk::Align::Center);
+    close_button.set_halign(gtk::Align::Center);
+    close_button.set_tooltip_text(Some("Close workspace"));
+
+    let top_row = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    top_row.append(&notify_dot);
+    top_row.append(&name_label);
+    top_row.append(&close_button);
+
+    // Second row: path label on the left, favorite star right-aligned below the X.
+    let path_label = gtk::Label::builder()
+        .xalign(0.0)
+        .hexpand(true)
+        .ellipsize(gtk::pango::EllipsizeMode::End)
+        .margin_start(8)
+        .build();
+    path_label.add_css_class("limux-ws-path");
+    if let Some(p) = folder_path {
+        path_label.set_label(&abbreviate_path(p));
+        path_label.set_tooltip_text(Some(p));
+    } else {
+        path_label.set_label("");
+    }
+
     let favorite_button = gtk::Button::with_label("\u{2606}");
     favorite_button.add_css_class("flat");
     favorite_button.add_css_class("limux-ws-star-btn");
@@ -1921,24 +2235,9 @@ fn build_sidebar_row(
     favorite_button.set_halign(gtk::Align::End);
     favorite_button.set_tooltip_text(Some("Favorite workspace"));
 
-    let top_row = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-    top_row.append(&notify_dot);
-    top_row.append(&name_label);
-    top_row.append(&favorite_button);
-
-    let path_label = gtk::Label::builder()
-        .xalign(0.0)
-        .ellipsize(gtk::pango::EllipsizeMode::End)
-        .margin_start(8)
-        .build();
-    path_label.add_css_class("limux-ws-path");
-    if let Some(p) = folder_path {
-        path_label.set_label(&abbreviate_path(p));
-        path_label.set_tooltip_text(Some(p));
-        path_label.set_visible(true);
-    } else {
-        path_label.set_visible(false);
-    }
+    let path_row = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    path_row.append(&path_label);
+    path_row.append(&favorite_button);
 
     let notify_label = gtk::Label::builder()
         .xalign(0.0)
@@ -1954,7 +2253,7 @@ fn build_sidebar_row(
         .build();
     vbox.add_css_class("limux-sidebar-row-box");
     vbox.append(&top_row);
-    vbox.append(&path_label);
+    vbox.append(&path_row);
     vbox.append(&notify_label);
 
     let row = gtk::ListBoxRow::new();
@@ -1967,6 +2266,7 @@ fn build_sidebar_row(
         notify_dot,
         notify_label,
         path_label,
+        close_button,
     )
 }
 
@@ -2118,6 +2418,7 @@ fn sync_sidebar_row_order(state: &mut AppState) {
     for workspace in &state.workspaces {
         state.sidebar_list.append(&workspace.sidebar_row);
     }
+    sync_indicator_order(state);
 }
 
 fn set_workspace_favorite_visual(workspace: &Workspace) {
@@ -2251,6 +2552,8 @@ fn begin_workspace_inline_rename(state: &State, workspace_id: &str) {
                     .find(|workspace| workspace.id == workspace_id)
                 {
                     workspace.name = next_name;
+                    // Update the indicator pill label
+                    update_indicator_label(&workspace.indicator_button, &workspace.name);
                 }
                 drop(s);
                 request_session_save(&state_for_commit);
@@ -2490,13 +2793,43 @@ fn create_workspace_for_tab(state: &State, payload: &str) -> bool {
     let split_container = SplitTreeContainer::new(state, pane.clone().upcast());
     let root = split_container.widget().clone();
 
-    let (row, name_label, favorite_button, notify_dot, notify_label, path_label) =
+    let (row, name_label, favorite_button, notify_dot, notify_label, path_label, close_button) =
         build_sidebar_row(&seed.name, seed.folder_path.as_deref());
+    // Wire close button
+    {
+        let state = state.clone();
+        let ws_id = new_workspace_id.clone();
+        close_button.connect_clicked(move |_| {
+            close_workspace_by_id(&state, &ws_id);
+        });
+    }
+    let (indicator_button, indicator_unread_dot) = build_workspace_indicator(&seed.name);
+    // Wire indicator pill click
+    {
+        let state = state.clone();
+        let ws_id = new_workspace_id.clone();
+        indicator_button.connect_clicked(move |_| {
+            let (idx, row, sidebar_list) = {
+                let s = state.borrow();
+                let Some(idx) = s.workspaces.iter().position(|w| w.id == ws_id) else {
+                    return;
+                };
+                (
+                    idx,
+                    s.workspaces[idx].sidebar_row.clone(),
+                    s.sidebar_list.clone(),
+                )
+            };
+            switch_workspace(&state, idx);
+            sidebar_list.select_row(Some(&row));
+        });
+    }
     let row_clone = row.clone();
     {
         let mut app_state = state.borrow_mut();
         app_state.stack.add_named(&root, Some(&stack_name));
         app_state.sidebar_list.append(&row);
+        app_state.indicator_box.append(&indicator_button);
         install_workspace_row_interactions(state, &new_workspace_id, &row, &favorite_button);
 
         app_state.workspaces.push(Workspace {
@@ -2514,8 +2847,11 @@ fn create_workspace_for_tab(state: &State, payload: &str) -> bool {
             cwd: Rc::new(RefCell::new(seed.cwd.clone())),
             folder_path: seed.folder_path.clone(),
             path_label,
+            indicator_button,
+            indicator_unread_dot,
         });
         app_state.active_idx = app_state.workspaces.len() - 1;
+        sync_indicator_active_state(&app_state);
         app_state.stack.set_visible_child_name(&stack_name);
     }
 
@@ -2721,7 +3057,27 @@ fn install_workspace_row_interactions(
 
 #[allow(deprecated)]
 fn add_workspace(state: &State, _working_directory: Option<&str>) {
-    // Open a folder chooser dialog (using FileChooserDialog to avoid portal crashes)
+    // If there's already an active workspace, clone its folder instead of
+    // asking — matches cmux UX where the "+" creates a workspace in context.
+    let active_folder = {
+        let s = state.borrow();
+        s.active_workspace().and_then(|ws| {
+            ws.folder_path
+                .clone()
+                .or_else(|| ws.cwd.borrow().clone())
+        })
+    };
+
+    if let Some(folder_path) = active_folder {
+        let folder_name = std::path::Path::new(&folder_path)
+            .file_name()
+            .map(|f| f.to_string_lossy().to_string())
+            .unwrap_or_else(|| folder_path.clone());
+        create_workspace_with_folder(state, &folder_name, &folder_path);
+        return;
+    }
+
+    // No active workspace (first-run): ask for a folder.
     let window: Option<gtk::Window> = {
         let s = state.borrow();
         s.stack
@@ -2945,6 +3301,7 @@ fn handle_control_command(state: &State, command: ControlCommand) {
                 let workspace = &mut app_state.workspaces[index];
                 workspace.name = title.clone();
                 workspace.name_label.set_label(&title);
+                update_indicator_label(&workspace.indicator_button, &title);
             }
             request_session_save(state);
 
@@ -3045,9 +3402,13 @@ fn add_workspace_from_state(state: &State, workspace: &WorkspaceState) {
         let s = state.borrow();
         s.shortcuts.clone()
     };
-    let (stack, sidebar_list) = {
+    let (stack, sidebar_list, indicator_box) = {
         let s = state.borrow();
-        (s.stack.clone(), s.sidebar_list.clone())
+        (
+            s.stack.clone(),
+            s.sidebar_list.clone(),
+            s.indicator_box.clone(),
+        )
     };
     let id = uuid::Uuid::new_v4().to_string();
     let stack_name = format!("ws-{id}");
@@ -3059,10 +3420,42 @@ fn add_workspace_from_state(state: &State, workspace: &WorkspaceState) {
         build_workspace_root(state, &shortcuts, &id, working_dir, &workspace.layout);
     stack.add_named(&root, Some(&stack_name));
 
-    let (row, name_label, favorite_button, notify_dot, notify_label, path_label) =
+    let (row, name_label, favorite_button, notify_dot, notify_label, path_label, close_button) =
         build_sidebar_row(&workspace.name, workspace.folder_path.as_deref());
     sidebar_list.append(&row);
     install_workspace_row_interactions(state, &id, &row, &favorite_button);
+    // Wire close button
+    {
+        let state = state.clone();
+        let ws_id = id.clone();
+        close_button.connect_clicked(move |_| {
+            close_workspace_by_id(&state, &ws_id);
+        });
+    }
+
+    let (indicator_button, indicator_unread_dot) = build_workspace_indicator(&workspace.name);
+    indicator_box.append(&indicator_button);
+
+    // Wire indicator pill click to switch workspace
+    {
+        let state = state.clone();
+        let ws_id = id.clone();
+        indicator_button.connect_clicked(move |_| {
+            let (idx, row, sidebar_list) = {
+                let s = state.borrow();
+                let Some(idx) = s.workspaces.iter().position(|w| w.id == ws_id) else {
+                    return;
+                };
+                (
+                    idx,
+                    s.workspaces[idx].sidebar_row.clone(),
+                    s.sidebar_list.clone(),
+                )
+            };
+            switch_workspace(&state, idx);
+            sidebar_list.select_row(Some(&row));
+        });
+    }
 
     let cwd: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(workspace.cwd.clone()));
     let ws = Workspace {
@@ -3080,6 +3473,8 @@ fn add_workspace_from_state(state: &State, workspace: &WorkspaceState) {
         cwd,
         folder_path: workspace.folder_path.clone(),
         path_label,
+        indicator_button,
+        indicator_unread_dot,
     };
 
     if workspace.favorite {
@@ -3090,6 +3485,7 @@ fn add_workspace_from_state(state: &State, workspace: &WorkspaceState) {
         let mut s = state.borrow_mut();
         s.workspaces.push(ws);
         s.active_idx = s.workspaces.len() - 1;
+        sync_indicator_active_state(&s);
     }
 
     stack.set_visible_child_name(&stack_name);
@@ -3276,6 +3672,7 @@ fn close_workspace_by_id_internal(
     let ws = s.workspaces.remove(idx);
     s.stack.remove(&ws.root);
     s.sidebar_list.remove(&ws.sidebar_row);
+    s.indicator_box.remove(&ws.indicator_button);
 
     if s.workspaces.is_empty() {
         s.active_idx = 0;
@@ -3297,6 +3694,7 @@ fn close_workspace_by_id_internal(
         idx,
     );
     s.active_idx = new_idx;
+    sync_indicator_active_state(&s);
 
     let stack_name = format!("ws-{}", s.workspaces[new_idx].id);
     s.stack.set_visible_child_name(&stack_name);
@@ -3318,6 +3716,7 @@ fn switch_workspace(state: &State, idx: usize) {
             return;
         }
         s.active_idx = idx;
+        sync_indicator_active_state(&s);
         let stack = s.stack.clone();
         let stack_name = format!("ws-{}", s.workspaces[idx].id);
         let focus_root = s.workspaces[idx].root.clone();
@@ -3329,6 +3728,8 @@ fn switch_workspace(state: &State, idx: usize) {
                 ws.notify_dot.clone(),
                 ws.notify_label.clone(),
                 ws.sidebar_row.clone(),
+                ws.indicator_button.clone(),
+                ws.indicator_unread_dot.clone(),
             ))
         } else {
             None
@@ -3342,7 +3743,9 @@ fn switch_workspace(state: &State, idx: usize) {
         focus_workspace_entrypoint(&focus_root);
     });
 
-    if let Some((notify_dot, notify_label, sidebar_row)) = unread_handles {
+    if let Some((notify_dot, notify_label, sidebar_row, indicator_btn, indicator_dot)) =
+        unread_handles
+    {
         notify_dot.remove_css_class("limux-notify-dot");
         notify_dot.add_css_class("limux-notify-dot-hidden");
         notify_label.remove_css_class("limux-notify-msg-unread");
@@ -3351,6 +3754,11 @@ fn switch_workspace(state: &State, idx: usize) {
         if let Some(row_box) = sidebar_row.child() {
             row_box.remove_css_class("limux-sidebar-row-unread");
         }
+        // Clear unread state on indicator pill
+        indicator_btn.remove_css_class("limux-indicator-pill-unread");
+        indicator_dot.remove_css_class("limux-indicator-unread-dot");
+        indicator_dot.add_css_class("limux-indicator-unread-dot-hidden");
+        indicator_dot.set_visible(false);
     }
 
     request_session_save(state);
@@ -3615,10 +4023,6 @@ fn split_pane(
     new_pane.upcast()
 }
 
-fn remove_pane(state: &State, ws_id: &str, pane_widget: &gtk::Widget) {
-    remove_pane_internal(state, ws_id, pane_widget, true);
-}
-
 fn remove_pane_internal(state: &State, ws_id: &str, pane_widget: &gtk::Widget, persist: bool) {
     let container = {
         let s = state.borrow();
@@ -3693,6 +4097,14 @@ fn find_leaf_focused_pane(state: &State) -> Option<(String, gtk::Widget)> {
             while let Some(c) = child {
                 if c.has_css_class("limux-pane-header") {
                     return Some((ws_id, w));
+                }
+                // Header may be wrapped in a WindowHandle for window dragging.
+                if let Some(handle) = c.downcast_ref::<gtk::WindowHandle>() {
+                    if let Some(inner) = handle.child() {
+                        if inner.has_css_class("limux-pane-header") {
+                            return Some((ws_id, w));
+                        }
+                    }
                 }
                 child = c.next_sibling();
             }
@@ -3885,15 +4297,11 @@ fn cycle_focused_pane_tab(state: &State, delta: i32) {
 }
 
 fn close_focused_tab(state: &State) {
-    if let Some((ws_id, pane_widget)) = find_focused_pane(state) {
-        let parent = pane_widget.parent();
-        // If this is the only pane (parent is Stack), don't close — keep workspace alive
-        if let Some(ref p) = parent {
-            if p.downcast_ref::<gtk::Stack>().is_some() {
-                return;
-            }
-        }
-        remove_pane(state, &ws_id, &pane_widget);
+    if let Some((_ws_id, pane_widget)) = find_focused_pane(state) {
+        // Close the active tab inside the pane. When the last tab closes, the
+        // pane's on_empty callback triggers remove_pane_internal, which removes
+        // the pane (or the whole workspace if it was the last pane).
+        pane::close_active_tab_in_pane(&pane_widget);
     }
 }
 
@@ -4047,10 +4455,17 @@ fn mark_workspace_unread_with_message(state: &State, ws_id: &str, message: &str)
             ws.notify_label.remove_css_class("limux-notify-msg");
             ws.notify_label.add_css_class("limux-notify-msg-unread");
             ws.notify_label.set_visible(true);
-            // Add glow pulse to the sidebar row box
             if let Some(row_box) = ws.sidebar_row.child() {
                 row_box.add_css_class("limux-sidebar-row-unread");
             }
+            // Show unread state on indicator pill
+            ws.indicator_button
+                .add_css_class("limux-indicator-pill-unread");
+            ws.indicator_unread_dot
+                .remove_css_class("limux-indicator-unread-dot-hidden");
+            ws.indicator_unread_dot
+                .add_css_class("limux-indicator-unread-dot");
+            ws.indicator_unread_dot.set_visible(true);
         }
     }
 }
