@@ -16,6 +16,7 @@ use crate::layout_state::{
     self, AppSessionState, LayoutNodeState, LoadedSession, PaneState, WorkspaceState,
 };
 use crate::pane::{self, PaneCallbacks};
+use crate::settings_editor;
 use crate::shortcut_config::{
     self, EditableCapturePolicy, ResolvedShortcutConfig, ShortcutCommand, ShortcutId,
 };
@@ -63,6 +64,17 @@ pub(crate) struct AppState {
     app: adw::Application,
     window: adw::ApplicationWindow,
     top_bar: Option<gtk::WindowHandle>,
+    top_bar_content: Option<gtk::Box>,
+    top_bar_minimize_btn: Option<gtk::Button>,
+    top_bar_maximize_btn: Option<gtk::Button>,
+    top_bar_close_btn: Option<gtk::Button>,
+    top_bar_sidebar_toggle: Option<gtk::Button>,
+    top_bar_new_ws_btn_ref: Option<gtk::Button>,
+    top_bar_settings_btn: Option<gtk::Button>,
+    sidebar_box: gtk::Box,
+    sidebar_header: gtk::Box,
+    sidebar_header_handle: gtk::WindowHandle,
+    sidebar_drag_area: gtk::Box,
     top_bar_visible: bool,
     config: Rc<RefCell<app_config::AppConfig>>,
     system_prefers_dark: Rc<Cell<Option<bool>>>,
@@ -307,6 +319,16 @@ fn apply_loaded_session(state: &State, loaded: LoadedSession) {
     if restored_any || matches!(loaded.source, layout_state::SessionLoadSource::Legacy) {
         save_session_now(state);
     }
+
+    // Defer one more apply until after the window is mapped, so the leading
+    // pane's widget tree is fully realized when we go to park the dock
+    // toggle on it.
+    {
+        let state = state.clone();
+        glib::idle_add_local_once(move || {
+            apply_top_bar_mode(&state);
+        });
+    }
 }
 
 fn restore_active_workspace(state: &State, index: usize) {
@@ -350,6 +372,9 @@ fn apply_sidebar_state_immediately(state: &State, sidebar_state: &layout_state::
         sidebar.set_visible(false);
         paned.set_position(0);
     }
+    // Re-run the top-bar mode now that sidebar visibility has been restored,
+    // so the dock toggle / controls land in the right place on startup.
+    apply_top_bar_mode(state);
 }
 
 fn apply_top_bar_state_immediately(state: &State, visible: bool) {
@@ -466,7 +491,7 @@ fn build_workspace_root(
     (root, container)
 }
 
-fn apply_ratio_value(
+pub(crate) fn apply_ratio_value(
     paned: &gtk::Paned,
     orientation: gtk::Orientation,
     ratio: f64,
@@ -495,19 +520,35 @@ pub(crate) fn apply_split_ratio_after_layout(
     ratio_cell: Rc<RefCell<f64>>,
     applying: Rc<Cell<bool>>,
 ) {
-    // Capture the ratio by value for the initial idle callback so that early
+    // Capture the ratio by value for the initial retry loop so that early
     // position_notify events (which may corrupt the cell) don't affect it.
     let initial_ratio = *ratio_cell.borrow();
 
-    let paned_for_idle = paned.clone();
-    let applying_for_idle = applying.clone();
-    glib::idle_add_local_once(move || {
-        apply_ratio_value(
-            &paned_for_idle,
-            orientation,
-            initial_ratio,
-            &applying_for_idle,
-        );
+    // GTK doesn't expose a reliable "allocation done" signal on GtkWidget.
+    // Poll via add_tick_callback until the paned actually has a non-zero
+    // width, then apply the ratio once and stop.
+    let paned_tick = paned.clone();
+    let applying_tick = applying.clone();
+    let applied = Rc::new(Cell::new(false));
+    paned.add_tick_callback(move |paned, _clock| {
+        if applied.get() {
+            return glib::ControlFlow::Break;
+        }
+        let size = if orientation == gtk::Orientation::Horizontal {
+            paned.width()
+        } else {
+            paned.height()
+        };
+        if size <= 0 {
+            return glib::ControlFlow::Continue;
+        }
+        let ok = apply_ratio_value(&paned_tick, orientation, initial_ratio, &applying_tick);
+        if ok {
+            applied.set(true);
+            glib::ControlFlow::Break
+        } else {
+            glib::ControlFlow::Continue
+        }
     });
 
     let paned_for_map = paned.clone();
@@ -517,6 +558,9 @@ pub(crate) fn apply_split_ratio_after_layout(
         let ratio = *ratio_cell.borrow();
         apply_ratio_value(&paned_for_map, orientation, ratio, &applying);
     });
+    // Note: width/height change handling (for sidebar toggles and window
+    // resizes) lives on the paned in split_tree.rs, where it has direct
+    // access to the shared ratio cell and the position-notify guard state.
 }
 
 pub(crate) fn attach_split_position_persistence(state: &State, paned: &gtk::Paned) {
@@ -663,8 +707,18 @@ const BASE_CSS: &str = r#"
     color: @window_fg_color;
     border-right: 1px solid alpha(@window_fg_color, 0.06);
 }
+.limux-sidebar-header {
+    padding: 0 4px;
+    min-height: 30px;
+}
 .limux-sidebar-list {
     background: transparent;
+    /* Make the gap above the first row match the visible gap between rows.
+       Adwaita's row adds its own vertical padding; give the first row the
+       same leading-space by adding an extra margin-top on it. */
+}
+.limux-sidebar-list row:first-child .limux-sidebar-row-box {
+    margin-top: 4px;
 }
 /* Strip default ListBox row selection styling; we paint the inner row box instead. */
 .limux-sidebar-list row,
@@ -700,10 +754,11 @@ const BASE_CSS: &str = r#"
     background: transparent;
     color: alpha(@window_fg_color, 0.3);
     border: none;
-    min-height: 0;
-    min-width: 0;
-    padding: 0 4px;
-    font-size: 14px;
+    border-radius: 4px;
+    min-height: 20px;
+    min-width: 20px;
+    padding: 0;
+    font-size: 12px;
     opacity: 0;
     transition: opacity 150ms ease;
 }
@@ -728,9 +783,9 @@ const BASE_CSS: &str = r#"
     color: alpha(@window_fg_color, 0.35);
     border: none;
     border-radius: 4px;
-    min-height: 0;
-    min-width: 0;
-    padding: 2px;
+    min-height: 20px;
+    min-width: 20px;
+    padding: 0;
     margin: 0;
     opacity: 0;
     -gtk-icon-size: 12px;
@@ -934,6 +989,7 @@ pub fn build_window(app: &adw::Application) {
 
     let top_bar_sidebar_toggle: gtk::Button;
     let top_bar_new_ws_btn: gtk::Button;
+    let top_bar_settings_btn: gtk::Button;
 
     // The top bar itself is a WindowHandle so empty space drags the window,
     // while child buttons (sidebar toggle, workspace pills, +) stay clickable.
@@ -953,7 +1009,17 @@ pub fn build_window(app: &adw::Application) {
     top_bar_content.append(&sidebar_toggle);
     top_bar_sidebar_toggle = sidebar_toggle;
 
-    // New workspace button, right next to the sidebar toggle
+    // Settings cog — between the dock toggle and the + button.
+    let settings_button = gtk::Button::from_icon_name("emblem-system-symbolic");
+    settings_button.add_css_class("flat");
+    settings_button.add_css_class("limux-top-bar-btn");
+    settings_button.set_focus_on_click(false);
+    settings_button.set_valign(gtk::Align::Center);
+    settings_button.set_tooltip_text(Some("Settings"));
+    top_bar_content.append(&settings_button);
+    top_bar_settings_btn = settings_button;
+
+    // New workspace button
     let new_ws = gtk::Button::from_icon_name("list-add-symbolic");
     new_ws.add_css_class("flat");
     new_ws.add_css_class("limux-top-bar-btn");
@@ -1093,6 +1159,20 @@ pub fn build_window(app: &adw::Application) {
     // top bar add button.
     new_ws_btn.set_visible(false);
 
+    // Alternate header for the sidebar, used when the top bar is hidden.
+    // Populated by apply_top_bar_mode() — stays empty + invisible otherwise.
+    // Wrapped in a WindowHandle so empty space in the header drags the window
+    // (same pattern as the regular top bar).
+    let sidebar_header = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .spacing(0)
+        .build();
+    sidebar_header.add_css_class("limux-sidebar-header");
+    let sidebar_header_handle = gtk::WindowHandle::builder()
+        .child(&sidebar_header)
+        .visible(false)
+        .build();
+
     let sidebar = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .spacing(0)
@@ -1100,6 +1180,7 @@ pub fn build_window(app: &adw::Application) {
         .build();
     sidebar.add_css_class("limux-sidebar");
     sidebar.append(&sidebar_drag_area);
+    sidebar.append(&sidebar_header_handle);
     sidebar.append(&sidebar_scroll);
 
     let main_paned = gtk::Paned::builder()
@@ -1122,6 +1203,17 @@ pub fn build_window(app: &adw::Application) {
         app: app.clone(),
         window: window.clone(),
         top_bar: Some(header.clone()),
+        top_bar_content: Some(top_bar_content.clone()),
+        top_bar_minimize_btn: Some(minimize_btn.clone()),
+        top_bar_maximize_btn: Some(maximize_btn.clone()),
+        top_bar_close_btn: Some(close_btn.clone()),
+        top_bar_sidebar_toggle: Some(top_bar_sidebar_toggle.clone()),
+        top_bar_new_ws_btn_ref: Some(top_bar_new_ws_btn.clone()),
+        top_bar_settings_btn: Some(top_bar_settings_btn.clone()),
+        sidebar_box: sidebar.clone(),
+        sidebar_header: sidebar_header.clone(),
+        sidebar_header_handle: sidebar_header_handle.clone(),
+        sidebar_drag_area: sidebar_drag_area.clone(),
         top_bar_visible: true,
         config,
         system_prefers_dark: system_prefers_dark.clone(),
@@ -1189,6 +1281,10 @@ pub fn build_window(app: &adw::Application) {
             sync_top_bar_visibility(&state);
         });
     }
+
+    // Apply the initial top-bar layout (controls side, sidebar-header mode,
+    // pane leading slot) based on the loaded config.
+    apply_top_bar_mode(&state);
 
     {
         let state = state.clone();
@@ -1268,6 +1364,15 @@ pub fn build_window(app: &adw::Application) {
         let state = state.clone();
         top_bar_new_ws_btn.connect_clicked(move |_| {
             add_workspace(&state, None);
+        });
+    }
+
+    // Wire top bar settings button — opens the same settings dialog the
+    // pane cog used to, parented on whatever widget makes sense.
+    {
+        let state = state.clone();
+        top_bar_settings_btn.connect_clicked(move |_| {
+            open_settings_dialog(&state);
         });
     }
 
@@ -1733,6 +1838,73 @@ fn refresh_shortcut_tooltips_in_layout(widget: &gtk::Widget, shortcuts: &Resolve
     pane::refresh_shortcut_tooltips(widget, shortcuts);
 }
 
+/// Open the Settings dialog from the top bar (the cog used to live on the
+/// pane action row).
+fn open_settings_dialog(state: &State) {
+    let (parent, config, shortcuts) = {
+        let s = state.borrow();
+        (
+            s.window.clone().upcast::<gtk::Widget>(),
+            s.config.clone(),
+            s.shortcuts.clone(),
+        )
+    };
+
+    let on_capture: Rc<
+        dyn Fn(
+            ShortcutId,
+            Option<shortcut_config::NormalizedShortcut>,
+        ) -> Result<ResolvedShortcutConfig, String>,
+    > = {
+        let state = state.clone();
+        Rc::new(move |id, binding| persist_shortcut_binding(&state, id, binding))
+    };
+
+    #[allow(clippy::type_complexity)]
+    let on_config_changed: Rc<dyn Fn(&app_config::AppConfig, &app_config::AppConfig)> = {
+        let state = state.clone();
+        Rc::new(move |previous, updated| {
+            handle_config_change(&state, previous, updated);
+        })
+    };
+
+    settings_editor::present_settings_dialog(
+        &parent,
+        settings_editor::SettingsEditorInput {
+            config,
+            shortcuts,
+            on_capture,
+            on_config_changed,
+        },
+    );
+}
+
+/// Apply a config change (appearance + interface side effects) and persist.
+/// On save error, revert the in-memory config and re-apply the previous state.
+fn handle_config_change(
+    state: &State,
+    previous: &app_config::AppConfig,
+    updated: &app_config::AppConfig,
+) {
+    let style_manager = adw::StyleManager::default();
+    let system_prefers_dark = state.borrow().system_prefers_dark.get();
+    apply_appearance(&style_manager, system_prefers_dark, &updated.appearance);
+    if previous.interface.window_controls_side != updated.interface.window_controls_side
+        || previous.interface.show_top_bar != updated.interface.show_top_bar
+    {
+        apply_top_bar_mode(state);
+    }
+    if let Err(err) = app_config::save(updated) {
+        state.borrow().config.borrow_mut().clone_from(previous);
+        apply_appearance(&style_manager, system_prefers_dark, &previous.appearance);
+        apply_top_bar_mode(state);
+
+        let detail = format!("Failed to save Limux settings: {err}");
+        eprintln!("limux: {detail}");
+        show_runtime_error(state, "Failed to save settings", &detail);
+    }
+}
+
 fn persist_shortcut_binding(
     state: &State,
     id: ShortcutId,
@@ -2054,6 +2226,196 @@ fn apply_appearance(
     sync_ghostty_color_scheme_for_config(style_manager, system_prefers_dark, appearance);
 }
 
+/// Detach a widget from its current parent, if it has one. Safe to call
+/// regardless of whether the widget is currently parented or not.
+fn detach(widget: &impl IsA<gtk::Widget>) {
+    let w = widget.as_ref();
+    if let Some(parent) = w.parent() {
+        if let Some(bx) = parent.downcast_ref::<gtk::Box>() {
+            bx.remove(w);
+        } else {
+            w.unparent();
+        }
+    }
+}
+
+/// Locate the leading pane of the currently active workspace, so we can park
+/// the dock toggle there when the top bar is hidden and the sidebar is closed.
+fn active_workspace_leading_pane(state: &State) -> Option<gtk::Widget> {
+    let root = {
+        let s = state.borrow();
+        s.active_workspace().map(|ws| ws.root.clone())
+    }?;
+    Some(first_leaf_pane(&root))
+}
+
+/// Reparent the dock toggle, + button, and window-controls into the top bar
+/// or the sidebar header (or, in the top-bar-off + sidebar-closed case, park
+/// the dock toggle on the active workspace's leading pane).
+fn apply_top_bar_mode(state: &State) {
+    let (
+        top_bar_handle,
+        top_bar_content_box,
+        dock_toggle,
+        settings_btn,
+        new_ws_btn,
+        minimize,
+        maximize,
+        close,
+        indicator_box,
+        sidebar_header,
+        sidebar_header_handle,
+        sidebar_drag_area,
+        show_top_bar,
+        controls_side,
+        sidebar_visible_now,
+    ) = {
+        let s = state.borrow();
+        let config = s.config.borrow();
+        (
+            s.top_bar.clone(),
+            s.top_bar_content.clone(),
+            s.top_bar_sidebar_toggle.clone(),
+            s.top_bar_settings_btn.clone(),
+            s.top_bar_new_ws_btn_ref.clone(),
+            s.top_bar_minimize_btn.clone(),
+            s.top_bar_maximize_btn.clone(),
+            s.top_bar_close_btn.clone(),
+            s.indicator_box.clone(),
+            s.sidebar_header.clone(),
+            s.sidebar_header_handle.clone(),
+            s.sidebar_drag_area.clone(),
+            // The persisted setting AND the transient keyboard toggle must
+            // both be on for the top bar layout to apply.
+            config.interface.show_top_bar && s.top_bar_visible,
+            config.interface.window_controls_side,
+            // Just the widget's visible property — the paned position can be
+            // stale during animations or startup; we don't want to misclassify
+            // a set_visible(true) sidebar as closed.
+            s.sidebar_box.is_visible(),
+        )
+    };
+
+    let (
+        Some(handle),
+        Some(content),
+        Some(dock),
+        Some(settings),
+        Some(new_ws),
+        Some(mi),
+        Some(ma),
+        Some(cl),
+    ) = (
+        top_bar_handle,
+        top_bar_content_box,
+        dock_toggle,
+        settings_btn,
+        new_ws_btn,
+        minimize,
+        maximize,
+        close,
+    )
+    else {
+        return;
+    };
+
+    // Detach the mobile widgets from wherever they're parented now — this
+    // covers the case where a widget lives in the top bar, the sidebar
+    // header, or a pane's leading_box from a previous arrangement.
+    detach(&dock);
+    detach(&settings);
+    detach(&new_ws);
+    detach(&mi);
+    detach(&ma);
+    detach(&cl);
+    detach(&indicator_box);
+
+    // Clear the alt sidebar header from previous arrangements (removes the
+    // leftover hexpand spacer child).
+    while let Some(child) = sidebar_header.first_child() {
+        sidebar_header.remove(&child);
+    }
+
+    if show_top_bar {
+        // Classic layout: put everything back into the top bar, in order
+        // dock | settings | new_ws | indicator_box | [controls at side]
+        content.append(&dock);
+        content.append(&settings);
+        content.append(&new_ws);
+        content.append(&indicator_box);
+
+        match controls_side {
+            app_config::WindowControlsSide::Left => {
+                cl.insert_before(&content, content.first_child().as_ref());
+                mi.insert_after(&content, Some(&cl));
+                ma.insert_after(&content, Some(&mi));
+            }
+            app_config::WindowControlsSide::Right => {
+                content.append(&mi);
+                content.append(&ma);
+                content.append(&cl);
+            }
+        }
+
+        handle.set_visible(true);
+        sidebar_header_handle.set_visible(false);
+        // Top bar already handles window drag — hide the 8px drag strip above
+        // the workspace list so the first row sits flush with the sidebar top,
+        // matching the sidebar-header mode's spacing.
+        sidebar_drag_area.set_visible(false);
+        return;
+    }
+
+    // Top bar hidden. Hide the whole top-bar widget.
+    handle.set_visible(false);
+
+    if sidebar_visible_now {
+        // Sidebar open: left group + expanding spacer + right group, so the
+        // window controls sit at one end and the app buttons at the other.
+        let spacer = gtk::Box::builder()
+            .orientation(gtk::Orientation::Horizontal)
+            .hexpand(true)
+            .build();
+
+        match controls_side {
+            app_config::WindowControlsSide::Left => {
+                // close | min | max || spacer || dock | settings | + (new_ws)
+                sidebar_header.append(&cl);
+                sidebar_header.append(&mi);
+                sidebar_header.append(&ma);
+                sidebar_header.append(&spacer);
+                sidebar_header.append(&dock);
+                sidebar_header.append(&settings);
+                sidebar_header.append(&new_ws);
+            }
+            app_config::WindowControlsSide::Right => {
+                // dock | settings | + || spacer || min | max | close
+                sidebar_header.append(&dock);
+                sidebar_header.append(&settings);
+                sidebar_header.append(&new_ws);
+                sidebar_header.append(&spacer);
+                sidebar_header.append(&mi);
+                sidebar_header.append(&ma);
+                sidebar_header.append(&cl);
+            }
+        }
+        sidebar_header_handle.set_visible(true);
+        // Sidebar header replaces the drag strip above it visually, so hide
+        // the 8px drag spacer to match the pane header height exactly.
+        sidebar_drag_area.set_visible(false);
+    } else {
+        // Sidebar collapsed: dock toggle goes on the leading pane, all other
+        // controls stay detached (not visible anywhere).
+        sidebar_header_handle.set_visible(false);
+        sidebar_drag_area.set_visible(true);
+        if let Some(pane) = active_workspace_leading_pane(state) {
+            if let Some(leading) = pane::pane_leading_box(&pane) {
+                leading.append(&dock);
+            }
+        }
+    }
+}
+
 fn open_keybind_editor_tab(state: &State, pane_widget: &gtk::Widget) {
     let shortcuts = {
         let s = state.borrow();
@@ -2204,7 +2566,7 @@ fn build_sidebar_row(
     close_button.add_css_class("limux-ws-close-btn");
     close_button.set_focus_on_click(false);
     close_button.set_valign(gtk::Align::Center);
-    close_button.set_halign(gtk::Align::Center);
+    close_button.set_halign(gtk::Align::End);
     close_button.set_tooltip_text(Some("Close workspace"));
 
     let top_row = gtk::Box::new(gtk::Orientation::Horizontal, 0);
@@ -2891,6 +3253,21 @@ fn install_workspace_row_interactions(
     }
     row.add_controller(right_click);
 
+    // Double-left-click anywhere on the row starts inline rename.
+    let double_click = gtk::GestureClick::new();
+    double_click.set_button(1);
+    {
+        let state = state.clone();
+        let workspace_id = workspace_id.to_string();
+        double_click.connect_pressed(move |gesture, n_press, _, _| {
+            if n_press == 2 {
+                gesture.set_state(gtk::EventSequenceState::Claimed);
+                begin_workspace_inline_rename(&state, &workspace_id);
+            }
+        });
+    }
+    row.add_controller(double_click);
+
     let drag_source = gtk::DragSource::new();
     drag_source.set_actions(gtk::gdk::DragAction::MOVE);
     {
@@ -3061,11 +3438,8 @@ fn add_workspace(state: &State, _working_directory: Option<&str>) {
     // asking — matches cmux UX where the "+" creates a workspace in context.
     let active_folder = {
         let s = state.borrow();
-        s.active_workspace().and_then(|ws| {
-            ws.folder_path
-                .clone()
-                .or_else(|| ws.cwd.borrow().clone())
-        })
+        s.active_workspace()
+            .and_then(|ws| ws.folder_path.clone().or_else(|| ws.cwd.borrow().clone()))
     };
 
     if let Some(folder_path) = active_folder {
@@ -3516,7 +3890,6 @@ pub(crate) fn create_pane_for_workspace(
     let ws_id_empty = ws_id.to_string();
     let state_for_split_with_tab = state.clone();
     let state_for_config = state.clone();
-    let state_for_config_changed = state.clone();
     let ws_id_split_with_tab = ws_id.to_string();
 
     let callbacks = Rc::new(PaneCallbacks {
@@ -3606,30 +3979,6 @@ pub(crate) fn create_pane_for_workspace(
             let s = state_for_config.borrow();
             s.config.clone()
         }),
-        on_config_changed: Rc::new(
-            move |previous: &app_config::AppConfig, updated: &app_config::AppConfig| {
-                let style_manager = adw::StyleManager::default();
-                let system_prefers_dark =
-                    state_for_config_changed.borrow().system_prefers_dark.get();
-                apply_appearance(&style_manager, system_prefers_dark, &updated.appearance);
-                if let Err(err) = app_config::save(updated) {
-                    state_for_config_changed
-                        .borrow()
-                        .config
-                        .borrow_mut()
-                        .clone_from(previous);
-                    apply_appearance(&style_manager, system_prefers_dark, &previous.appearance);
-
-                    let detail = format!("Failed to save Limux settings: {err}");
-                    eprintln!("limux: {detail}");
-                    show_runtime_error(
-                        &state_for_config_changed,
-                        "Failed to save settings",
-                        &detail,
-                    );
-                }
-            },
-        ),
     });
 
     pane::create_pane(
@@ -3761,6 +4110,9 @@ fn switch_workspace(state: &State, idx: usize) {
         indicator_dot.set_visible(false);
     }
 
+    // If the dock toggle is parked on a pane (top-bar off, sidebar closed),
+    // move it to the new active workspace's leading pane.
+    apply_top_bar_mode(state);
     request_session_save(state);
 }
 
@@ -3848,6 +4200,9 @@ fn toggle_top_bar(state: &State) {
         s.top_bar_visible = !s.top_bar_visible;
     }
     sync_top_bar_visibility(state);
+    // Also reparent the dock/settings/+/window controls so they don't get
+    // stranded when the user hides the top bar via the keyboard shortcut.
+    apply_top_bar_mode(state);
     request_session_save(state);
 }
 
@@ -3918,6 +4273,7 @@ fn toggle_sidebar(state: &State) {
             };
             if is_current {
                 sidebar.set_visible(false);
+                apply_top_bar_mode(&state_for_done);
                 request_session_save(&state_for_done);
             }
         });
@@ -3926,6 +4282,7 @@ fn toggle_sidebar(state: &State) {
     } else {
         // Expand: make sidebar visible, then animate position from 0 to remembered width.
         sidebar.set_visible(true);
+        apply_top_bar_mode(state);
         paned.set_position(0);
         let target = adw::CallbackAnimationTarget::new({
             let p = paned.clone();
@@ -4017,6 +4374,14 @@ fn split_pane(
         layout_state::DEFAULT_SPLIT_RATIO,
     );
 
+    // Split may have changed which pane is the workspace's leading one.
+    {
+        let state = state.clone();
+        glib::idle_add_local_once(move || {
+            apply_top_bar_mode(&state);
+        });
+    }
+
     if options.persist {
         request_session_save(state);
     }
@@ -4042,6 +4407,17 @@ fn remove_pane_internal(state: &State, ws_id: &str, pane_widget: &gtk::Widget, p
 
     // Mutate the data model and trigger async widget tree rebuild
     container.remove(pane_widget);
+
+    // After the pane is removed, the workspace's leading pane may be a
+    // different widget — reapply so the dock toggle (when top bar is off and
+    // sidebar closed) lands on the new leading pane. Run on idle so the
+    // split-tree rebuild has finished allocating the new widgets.
+    {
+        let state = state.clone();
+        glib::idle_add_local_once(move || {
+            apply_top_bar_mode(&state);
+        });
+    }
 
     if persist {
         request_session_save(state);

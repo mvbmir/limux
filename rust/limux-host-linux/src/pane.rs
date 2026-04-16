@@ -18,7 +18,6 @@ use webkit6::prelude::*;
 use crate::app_config::AppConfig;
 use crate::keybind_editor;
 use crate::layout_state::{PaneState, TabContentState, TabState as SavedTabState};
-use crate::settings_editor;
 use crate::shortcut_config::{NormalizedShortcut, ResolvedShortcutConfig, ShortcutId};
 use crate::terminal::{self, TerminalCallbacks};
 
@@ -167,7 +166,6 @@ type PaneShortcutCaptureCallback =
     dyn Fn(ShortcutId, Option<NormalizedShortcut>) -> Result<ResolvedShortcutConfig, String>;
 type PaneSplitWithTabCallback = dyn Fn(&gtk::Widget, &gtk::Widget, gtk::Orientation, String, bool);
 type PaneConfigCallback = dyn Fn() -> Rc<RefCell<AppConfig>>;
-type PaneConfigChangedCallback = dyn Fn(&AppConfig, &AppConfig);
 
 pub struct PaneCallbacks {
     pub on_split: Box<PaneSplitCallback>,
@@ -183,7 +181,6 @@ pub struct PaneCallbacks {
     pub on_state_changed: Box<PaneSignalCallback>,
     pub on_split_with_tab: Box<PaneSplitWithTabCallback>,
     pub current_config: Box<PaneConfigCallback>,
-    pub on_config_changed: Rc<PaneConfigChangedCallback>,
 }
 
 #[derive(Clone)]
@@ -392,12 +389,22 @@ pub fn create_pane(
         .vexpand(true)
         .build();
 
-    // The single header line: tabs (left) + action icons (right)
+    // The single header line: [leading slot] tabs (left) + action icons (right)
     let header = gtk::Box::builder()
         .orientation(gtk::Orientation::Horizontal)
         .spacing(0)
         .build();
     header.add_css_class("limux-pane-header");
+
+    // Empty leading slot at the very start of the header — window.rs can
+    // stash the dock toggle here when the top bar is hidden and the sidebar
+    // is collapsed. Hidden by default (no children = no width).
+    let leading_box = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .spacing(0)
+        .build();
+    leading_box.add_css_class("limux-pane-leading");
+    header.append(&leading_box);
 
     let tab_overlay = gtk::Overlay::new();
     tab_overlay.add_css_class("limux-tab-overlay");
@@ -472,7 +479,6 @@ pub fn create_pane(
         "limux-split-vertical-symbolic",
         &pane_action_tooltip(&shortcuts, "Split down", Some(ShortcutId::SplitDown)),
     );
-    let settings_btn = icon_button("emblem-system-symbolic", "Settings");
     let close_btn = icon_button(
         "window-close-symbolic",
         &pane_action_tooltip(&shortcuts, "Close pane", Some(ShortcutId::CloseFocusedPane)),
@@ -482,7 +488,6 @@ pub fn create_pane(
     actions.append(&new_browser_btn);
     actions.append(&split_h_btn);
     actions.append(&split_v_btn);
-    actions.append(&settings_btn);
     actions.append(&close_btn);
 
     header.append(&tab_overlay);
@@ -508,6 +513,7 @@ pub fn create_pane(
         drop_indicator: drop_indicator.clone(),
         content_drop_overlay: content_drop_overlay.clone(),
         pane_outer: outer.clone(),
+        leading_box: leading_box.clone(),
         callbacks: callbacks.clone(),
         working_directory: ws_wd.clone(),
         workspace_dragging: workspace_dragging.clone(),
@@ -558,21 +564,6 @@ pub fn create_pane(
             (cb.on_close_pane)(&pw.clone().upcast());
         });
     }
-    {
-        let internals = internals.clone();
-        settings_btn.connect_clicked(move |_| {
-            settings_editor::present_settings_dialog(
-                &internals.pane_outer,
-                settings_editor::SettingsEditorInput {
-                    config: (internals.callbacks.current_config)(),
-                    shortcuts: (internals.callbacks.current_shortcuts)(),
-                    on_capture: internals.callbacks.on_capture_shortcut.clone(),
-                    on_config_changed: internals.callbacks.on_config_changed.clone(),
-                },
-            );
-        });
-    }
-
     install_tab_strip_drop_target(&tab_overlay, &internals);
     install_content_drop_target(&internals);
 
@@ -758,6 +749,7 @@ pub struct PaneInternals {
     drop_indicator: gtk::Box,
     content_drop_overlay: gtk::Box,
     pane_outer: gtk::Box,
+    leading_box: gtk::Box,
     callbacks: Rc<PaneCallbacks>,
     working_directory: Rc<std::cell::RefCell<Option<String>>>,
     workspace_dragging: Rc<Cell<bool>>,
@@ -1424,6 +1416,13 @@ fn find_pane_internals(pane_widget: &gtk::Widget) -> Option<Rc<PaneInternals>> {
             .data::<Rc<PaneInternals>>("limux-pane-internals")
             .map(|ptr| ptr.as_ref().clone())
     }
+}
+
+/// Returns the leading slot (at the very start of the pane header) so the
+/// outer app can place widgets there (e.g. a dock toggle). The box stays
+/// empty by default.
+pub fn pane_leading_box(pane_widget: &gtk::Widget) -> Option<gtk::Box> {
+    find_pane_internals(pane_widget).map(|internals| internals.leading_box.clone())
 }
 
 pub fn is_pane_widget(widget: &gtk::Widget) -> bool {
