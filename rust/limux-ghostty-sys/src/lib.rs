@@ -74,6 +74,42 @@ pub const GHOSTTY_ACTION_CLOSE_WINDOW: c_int = 48;
 pub const GHOSTTY_ACTION_RING_BELL: c_int = 49;
 pub const GHOSTTY_ACTION_SHOW_CHILD_EXITED: c_int = 54;
 
+// Mouse shape — values must match ghostty_action_mouse_shape_e in ghostty.h
+pub const GHOSTTY_MOUSE_SHAPE_DEFAULT: c_int = 0;
+pub const GHOSTTY_MOUSE_SHAPE_CONTEXT_MENU: c_int = 1;
+pub const GHOSTTY_MOUSE_SHAPE_HELP: c_int = 2;
+pub const GHOSTTY_MOUSE_SHAPE_POINTER: c_int = 3;
+pub const GHOSTTY_MOUSE_SHAPE_PROGRESS: c_int = 4;
+pub const GHOSTTY_MOUSE_SHAPE_WAIT: c_int = 5;
+pub const GHOSTTY_MOUSE_SHAPE_CELL: c_int = 6;
+pub const GHOSTTY_MOUSE_SHAPE_CROSSHAIR: c_int = 7;
+pub const GHOSTTY_MOUSE_SHAPE_TEXT: c_int = 8;
+pub const GHOSTTY_MOUSE_SHAPE_VERTICAL_TEXT: c_int = 9;
+pub const GHOSTTY_MOUSE_SHAPE_ALIAS: c_int = 10;
+pub const GHOSTTY_MOUSE_SHAPE_COPY: c_int = 11;
+pub const GHOSTTY_MOUSE_SHAPE_MOVE: c_int = 12;
+pub const GHOSTTY_MOUSE_SHAPE_NO_DROP: c_int = 13;
+pub const GHOSTTY_MOUSE_SHAPE_NOT_ALLOWED: c_int = 14;
+pub const GHOSTTY_MOUSE_SHAPE_GRAB: c_int = 15;
+pub const GHOSTTY_MOUSE_SHAPE_GRABBING: c_int = 16;
+pub const GHOSTTY_MOUSE_SHAPE_ALL_SCROLL: c_int = 17;
+pub const GHOSTTY_MOUSE_SHAPE_COL_RESIZE: c_int = 18;
+pub const GHOSTTY_MOUSE_SHAPE_ROW_RESIZE: c_int = 19;
+pub const GHOSTTY_MOUSE_SHAPE_N_RESIZE: c_int = 20;
+pub const GHOSTTY_MOUSE_SHAPE_E_RESIZE: c_int = 21;
+pub const GHOSTTY_MOUSE_SHAPE_S_RESIZE: c_int = 22;
+pub const GHOSTTY_MOUSE_SHAPE_W_RESIZE: c_int = 23;
+pub const GHOSTTY_MOUSE_SHAPE_NE_RESIZE: c_int = 24;
+pub const GHOSTTY_MOUSE_SHAPE_NW_RESIZE: c_int = 25;
+pub const GHOSTTY_MOUSE_SHAPE_SE_RESIZE: c_int = 26;
+pub const GHOSTTY_MOUSE_SHAPE_SW_RESIZE: c_int = 27;
+pub const GHOSTTY_MOUSE_SHAPE_EW_RESIZE: c_int = 28;
+pub const GHOSTTY_MOUSE_SHAPE_NS_RESIZE: c_int = 29;
+pub const GHOSTTY_MOUSE_SHAPE_NESW_RESIZE: c_int = 30;
+pub const GHOSTTY_MOUSE_SHAPE_NWSE_RESIZE: c_int = 31;
+pub const GHOSTTY_MOUSE_SHAPE_ZOOM_IN: c_int = 32;
+pub const GHOSTTY_MOUSE_SHAPE_ZOOM_OUT: c_int = 33;
+
 // Key codes (W3C UIEvents, subset)
 pub const GHOSTTY_KEY_UNIDENTIFIED: c_int = 0;
 // Writing System Keys
@@ -297,6 +333,8 @@ pub union ghostty_action_u {
     pub set_title: ghostty_action_set_title_s,
     pub pwd: ghostty_action_pwd_s,
     pub child_exited: ghostty_surface_message_childexited_s,
+    pub mouse_shape: c_int,
+    pub config_change: ghostty_action_config_change_s,
     _padding: [u8; 24],
 }
 
@@ -324,6 +362,12 @@ pub struct ghostty_action_pwd_s {
 pub struct ghostty_surface_message_childexited_s {
     pub exit_code: u32,
     pub runtime_ms: u64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct ghostty_action_config_change_s {
+    pub config: ghostty_config_t,
 }
 
 // Runtime config (callbacks)
