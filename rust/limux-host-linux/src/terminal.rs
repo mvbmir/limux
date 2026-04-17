@@ -10,7 +10,7 @@ use std::os::raw::{c_char, c_int, c_void};
 use std::os::unix::ffi::OsStringExt;
 use std::ptr;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::OnceLock;
 use std::time::Duration;
 
@@ -31,6 +31,7 @@ unsafe impl Sync for GhosttyState {}
 
 static GHOSTTY: OnceLock<GhosttyState> = OnceLock::new();
 static CURRENT_COLOR_SCHEME: AtomicI32 = AtomicI32::new(GHOSTTY_COLOR_SCHEME_LIGHT);
+static WAKEUP_IDLE_QUEUED: AtomicBool = AtomicBool::new(false);
 
 type TitleChangedCallback = dyn Fn(&str);
 type PwdChangedCallback = dyn Fn(&str);
@@ -162,6 +163,17 @@ impl TerminalHandle {
         let surface = *self.surface_cell.borrow();
         surface_action(surface, action);
         surface.is_some()
+    }
+
+    /// Inject text into the terminal surface for control-socket requests and
+    /// drag/drop payloads. Ghostty treats this as pasted text, which matches
+    /// the current control protocol semantics.
+    pub fn send_text(&self, text: &str) {
+        if let Some(surface) = *self.surface_cell.borrow() {
+            unsafe {
+                ghostty_surface_text(surface, text.as_ptr() as *const c_char, text.len());
+            }
+        }
     }
 
     pub fn show_find(&self) -> bool {
@@ -436,11 +448,25 @@ pub fn sync_color_scheme(dark: bool) {
 // Runtime callbacks (C ABI)
 // ---------------------------------------------------------------------------
 
+fn claim_wakeup_idle_slot(flag: &AtomicBool) -> bool {
+    !flag.swap(true, Ordering::AcqRel)
+}
+
+fn release_wakeup_idle_slot(flag: &AtomicBool) {
+    flag.store(false, Ordering::Release);
+}
+
 unsafe extern "C" fn ghostty_wakeup_cb(_userdata: *mut c_void) {
-    glib::idle_add_once(|| {
-        let app = ghostty_app();
-        unsafe { ghostty_app_tick(app) };
-    });
+    // Collapse renderer wakeups to a single pending idle source so text floods
+    // do not enqueue unbounded GTK callbacks on the main thread.
+    if claim_wakeup_idle_slot(&WAKEUP_IDLE_QUEUED) {
+        glib::idle_add_once(|| {
+            release_wakeup_idle_slot(&WAKEUP_IDLE_QUEUED);
+            let app = ghostty_app();
+            unsafe { ghostty_app_tick(app) };
+        });
+    }
+    glib::MainContext::default().wakeup();
 }
 
 unsafe extern "C" fn ghostty_action_cb(
@@ -561,6 +587,19 @@ unsafe extern "C" fn ghostty_action_cb(
             }
             true
         }
+        GHOSTTY_ACTION_MOUSE_SHAPE => {
+            if target.tag == GHOSTTY_TARGET_SURFACE {
+                let surface_key = unsafe { target.target.surface } as usize;
+                let shape = unsafe { action.action.mouse_shape };
+                let cursor_name = mouse_shape_to_cursor_name(shape);
+                SURFACE_MAP.with(|map| {
+                    if let Some(entry) = map.borrow().get(&surface_key) {
+                        entry.gl_area.set_cursor_from_name(Some(cursor_name));
+                    }
+                });
+            }
+            true
+        }
         GHOSTTY_ACTION_RELOAD_CONFIG => {
             let config = load_ghostty_config();
             match target.tag {
@@ -580,7 +619,54 @@ unsafe extern "C" fn ghostty_action_cb(
             }
             true
         }
+        GHOSTTY_ACTION_CONFIG_CHANGE => {
+            // Intentional no-op: forwarding the config back into
+            // ghostty_*_update_config re-enters this callback and recurses.
+            // The config is owned by Ghostty core; nothing to free here.
+            true
+        }
         _ => false,
+    }
+}
+
+/// Convert a Ghostty mouse shape enum value to a CSS cursor name for GTK4.
+fn mouse_shape_to_cursor_name(shape: c_int) -> &'static str {
+    match shape {
+        GHOSTTY_MOUSE_SHAPE_DEFAULT => "default",
+        GHOSTTY_MOUSE_SHAPE_CONTEXT_MENU => "context-menu",
+        GHOSTTY_MOUSE_SHAPE_HELP => "help",
+        GHOSTTY_MOUSE_SHAPE_POINTER => "pointer",
+        GHOSTTY_MOUSE_SHAPE_PROGRESS => "progress",
+        GHOSTTY_MOUSE_SHAPE_WAIT => "wait",
+        GHOSTTY_MOUSE_SHAPE_CELL => "cell",
+        GHOSTTY_MOUSE_SHAPE_CROSSHAIR => "crosshair",
+        GHOSTTY_MOUSE_SHAPE_TEXT => "text",
+        GHOSTTY_MOUSE_SHAPE_VERTICAL_TEXT => "vertical-text",
+        GHOSTTY_MOUSE_SHAPE_ALIAS => "alias",
+        GHOSTTY_MOUSE_SHAPE_COPY => "copy",
+        GHOSTTY_MOUSE_SHAPE_MOVE => "move",
+        GHOSTTY_MOUSE_SHAPE_NO_DROP => "no-drop",
+        GHOSTTY_MOUSE_SHAPE_NOT_ALLOWED => "not-allowed",
+        GHOSTTY_MOUSE_SHAPE_GRAB => "grab",
+        GHOSTTY_MOUSE_SHAPE_GRABBING => "grabbing",
+        GHOSTTY_MOUSE_SHAPE_ALL_SCROLL => "all-scroll",
+        GHOSTTY_MOUSE_SHAPE_COL_RESIZE => "col-resize",
+        GHOSTTY_MOUSE_SHAPE_ROW_RESIZE => "row-resize",
+        GHOSTTY_MOUSE_SHAPE_N_RESIZE => "n-resize",
+        GHOSTTY_MOUSE_SHAPE_E_RESIZE => "e-resize",
+        GHOSTTY_MOUSE_SHAPE_S_RESIZE => "s-resize",
+        GHOSTTY_MOUSE_SHAPE_W_RESIZE => "w-resize",
+        GHOSTTY_MOUSE_SHAPE_NE_RESIZE => "ne-resize",
+        GHOSTTY_MOUSE_SHAPE_NW_RESIZE => "nw-resize",
+        GHOSTTY_MOUSE_SHAPE_SE_RESIZE => "se-resize",
+        GHOSTTY_MOUSE_SHAPE_SW_RESIZE => "sw-resize",
+        GHOSTTY_MOUSE_SHAPE_EW_RESIZE => "ew-resize",
+        GHOSTTY_MOUSE_SHAPE_NS_RESIZE => "ns-resize",
+        GHOSTTY_MOUSE_SHAPE_NESW_RESIZE => "nesw-resize",
+        GHOSTTY_MOUSE_SHAPE_NWSE_RESIZE => "nwse-resize",
+        GHOSTTY_MOUSE_SHAPE_ZOOM_IN => "zoom-in",
+        GHOSTTY_MOUSE_SHAPE_ZOOM_OUT => "zoom-out",
+        _ => "default",
     }
 }
 
@@ -784,6 +870,14 @@ pub struct TerminalCallbacks {
 
 pub struct TerminalOptions {
     pub hover_focus: Rc<dyn Fn() -> bool>,
+    pub saved_font_size: Option<f32>,
+}
+
+/// Default font-size from ghostty config (cached on first access).
+pub(crate) fn default_font_size() -> f32 {
+    use std::sync::OnceLock;
+    static SIZE: OnceLock<f32> = OnceLock::new();
+    *SIZE.get_or_init(crate::ghostty_config::read_font_size)
 }
 
 /// Create a new Ghostty-powered terminal widget.
@@ -802,8 +896,12 @@ pub fn create_terminal(
     gl_area.set_auto_render(true);
     gl_area.set_focusable(true);
     gl_area.set_can_focus(true);
+    gl_area.connect_map(|gl_area| {
+        gl_area.queue_render();
+    });
 
     let wd = working_directory.map(|s| s.to_string());
+    let saved_font_size = options.saved_font_size;
     let hover_focus = options.hover_focus;
     let callbacks = Rc::new(RefCell::new(callbacks));
     let surface_cell: Rc<RefCell<Option<ghostty_surface_t>>> = Rc::new(RefCell::new(None));
@@ -955,6 +1053,18 @@ pub fn create_terminal(
                 ghostty_surface_set_color_scheme(surface, current_ghostty_color_scheme());
             }
             clipboard_context_cell.set(clipboard_context);
+
+            // Apply saved font size (if different from ghostty default)
+            if let Some(size) = saved_font_size {
+                let action = format!("set_font_size:{size}");
+                unsafe {
+                    ghostty_surface_binding_action(
+                        surface,
+                        action.as_ptr() as *const c_char,
+                        action.len(),
+                    );
+                }
+            }
 
             // Set initial size — GLArea gives unscaled CSS pixels,
             // Ghostty handles scaling internally via content_scale.
@@ -1390,6 +1500,22 @@ pub fn create_terminal(
 // ---------------------------------------------------------------------------
 // Context menu
 // ---------------------------------------------------------------------------
+
+/// Send a binding action to every live surface.
+pub(crate) fn broadcast_binding_action(action: &str) {
+    SURFACE_MAP.with(|map| {
+        for &key in map.borrow().keys() {
+            let surface = key as ghostty_surface_t;
+            unsafe {
+                ghostty_surface_binding_action(
+                    surface,
+                    action.as_ptr() as *const c_char,
+                    action.len(),
+                );
+            }
+        }
+    });
+}
 
 fn surface_action(surface: Option<ghostty_surface_t>, action: &str) {
     if let Some(surface) = surface {
@@ -1915,5 +2041,17 @@ mod tests {
     #[test]
     fn shell_escape_joined_bytes_rejects_empty_input() {
         assert!(shell_escape_joined_bytes(std::iter::empty::<&[u8]>()).is_none());
+    }
+
+    #[test]
+    fn wakeup_idle_slot_coalesces_until_released() {
+        let flag = AtomicBool::new(false);
+
+        assert!(claim_wakeup_idle_slot(&flag));
+        assert!(!claim_wakeup_idle_slot(&flag));
+
+        release_wakeup_idle_slot(&flag);
+
+        assert!(claim_wakeup_idle_slot(&flag));
     }
 }
