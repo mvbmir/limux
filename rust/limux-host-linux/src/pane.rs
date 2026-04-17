@@ -617,6 +617,39 @@ pub fn cycle_tab_in_pane(pane_widget: &gtk::Widget, delta: i32) {
     (internals.callbacks.on_state_changed)();
 }
 
+/// Close the currently active tab in the given pane. If this was the last
+/// tab, the pane is closed via the `on_empty` callback (which in turn closes
+/// the workspace if that was the last pane).
+pub fn close_active_tab_in_pane(pane_widget: &gtk::Widget) {
+    let Some(outer) = pane_widget.downcast_ref::<gtk::Box>() else {
+        return;
+    };
+    let internals: Rc<PaneInternals> = unsafe {
+        match outer.data::<Rc<PaneInternals>>("limux-pane-internals") {
+            Some(ptr) => ptr.as_ref().clone(),
+            None => return,
+        }
+    };
+
+    let active_id = {
+        let ts = internals.tab_state.borrow();
+        ts.active_tab.clone()
+    };
+    let Some(tab_id) = active_id else {
+        return;
+    };
+
+    remove_tab(
+        &internals.tab_strip,
+        &internals.content_stack,
+        &internals.tab_state,
+        &tab_id,
+        &internals.callbacks,
+        outer,
+        PaneEmptyReason::ClosedLastTab,
+    );
+}
+
 pub fn focus_active_tab_in_pane(pane_widget: &gtk::Widget) -> bool {
     let Some(internals) = find_pane_internals(pane_widget) else {
         return false;

@@ -1719,7 +1719,11 @@ fn dispatch_shortcut_command(state: &State, command: ShortcutCommand) -> bool {
             true
         }
         ShortcutCommand::CloseFocusedPane => {
-            close_focused_tab(state);
+            close_focused_pane(state);
+            true
+        }
+        ShortcutCommand::CloseFocusedTab => {
+            close_focused_active_tab(state);
             true
         }
         ShortcutCommand::FocusLeft => {
@@ -4695,7 +4699,7 @@ fn cycle_focused_pane_tab(state: &State, delta: i32) {
     }
 }
 
-fn close_focused_tab(state: &State) {
+fn close_focused_pane(state: &State) {
     if let Some((ws_id, pane_widget)) = find_focused_pane(state) {
         let parent = pane_widget.parent();
         // If this is the only pane (parent is Stack), don't close — keep workspace alive
@@ -4705,6 +4709,15 @@ fn close_focused_tab(state: &State) {
             }
         }
         remove_pane(state, &ws_id, &pane_widget);
+    }
+}
+
+/// Close the active tab inside the focused pane. When the last tab closes,
+/// the pane's on_empty callback fires and the pane is removed (and the
+/// workspace if it was the last pane).
+fn close_focused_active_tab(state: &State) {
+    if let Some((_ws_id, pane_widget)) = find_focused_pane(state) {
+        pane::close_active_tab_in_pane(&pane_widget);
     }
 }
 
