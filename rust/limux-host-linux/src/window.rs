@@ -1891,6 +1891,8 @@ fn handle_config_change(
     apply_appearance(&style_manager, system_prefers_dark, &updated.appearance);
     if previous.interface.window_controls_side != updated.interface.window_controls_side
         || previous.interface.show_top_bar != updated.interface.show_top_bar
+        || previous.interface.show_workspace_indicators
+            != updated.interface.show_workspace_indicators
     {
         apply_top_bar_mode(state);
     }
@@ -2268,6 +2270,7 @@ fn apply_top_bar_mode(state: &State) {
         sidebar_drag_area,
         show_top_bar,
         controls_side,
+        show_workspace_indicators,
         sidebar_visible_now,
     ) = {
         let s = state.borrow();
@@ -2289,6 +2292,7 @@ fn apply_top_bar_mode(state: &State) {
             // both be on for the top bar layout to apply.
             config.interface.show_top_bar && s.top_bar_visible,
             config.interface.window_controls_side,
+            config.interface.show_workspace_indicators,
             // Just the widget's visible property — the paned position can be
             // stale during animations or startup; we don't want to misclassify
             // a set_visible(true) sidebar as closed.
@@ -2334,6 +2338,17 @@ fn apply_top_bar_mode(state: &State) {
     // leftover hexpand spacer child).
     while let Some(child) = sidebar_header.first_child() {
         sidebar_header.remove(&child);
+    }
+
+    // Workspace indicator pills are only shown when the user opts in.
+    // Hide the individual pills (children) rather than the box itself so the
+    // box keeps its hexpand spacer role between the top bar's left group and
+    // the window controls on the right.
+    {
+        let s = state.borrow();
+        for ws in &s.workspaces {
+            ws.indicator_button.set_visible(show_workspace_indicators);
+        }
     }
 
     if show_top_bar {
@@ -3223,6 +3238,7 @@ fn create_workspace_for_tab(state: &State, payload: &str) -> bool {
     }
 
     if pane::move_tab_to_pane(&source_pane, tab_id, &pane.clone().upcast()) {
+        apply_top_bar_mode(state);
         request_session_save(state);
         return true;
     }
@@ -3864,6 +3880,9 @@ fn add_workspace_from_state(state: &State, workspace: &WorkspaceState) {
 
     stack.set_visible_child_name(&stack_name);
     sidebar_list.select_row(Some(&row));
+    // Ensure the new pill's visibility honors the show_workspace_indicators
+    // preference, and that pane/sidebar placement is up to date.
+    apply_top_bar_mode(state);
 }
 
 /// Create a PaneWidget wired up with callbacks for a specific workspace.

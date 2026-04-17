@@ -82,6 +82,7 @@ pub struct AppearanceConfig {
 pub struct InterfaceConfig {
     pub window_controls_side: WindowControlsSide,
     pub show_top_bar: bool,
+    pub show_workspace_indicators: bool,
 }
 
 impl Default for InterfaceConfig {
@@ -89,6 +90,7 @@ impl Default for InterfaceConfig {
         Self {
             window_controls_side: WindowControlsSide::default(),
             show_top_bar: true,
+            show_workspace_indicators: true,
         }
     }
 }
@@ -209,6 +211,11 @@ fn parse_app_config_value(root: &Value) -> AppConfig {
         .and_then(Value::as_bool)
         .unwrap_or(true);
 
+    let show_workspace_indicators = interface_obj
+        .and_then(|interface| interface.get("show_workspace_indicators"))
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+
     AppConfig {
         focus: FocusConfig {
             hover_terminal_focus,
@@ -220,6 +227,7 @@ fn parse_app_config_value(root: &Value) -> AppConfig {
         interface: InterfaceConfig {
             window_controls_side,
             show_top_bar,
+            show_workspace_indicators,
         },
         font_size,
     }
@@ -253,6 +261,7 @@ fn save_to_path(path: &Path, config: &AppConfig) -> Result<(), String> {
         json!({
             "window_controls_side": config.interface.window_controls_side.as_str(),
             "show_top_bar": config.interface.show_top_bar,
+            "show_workspace_indicators": config.interface.show_workspace_indicators,
         }),
     );
 

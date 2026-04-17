@@ -180,6 +180,19 @@ fn build_general_page(input: &SettingsEditorInput) -> gtk::Widget {
     top_bar_row.set_activatable_widget(Some(&top_bar_switch));
     group.add(&top_bar_row);
 
+    let indicators_row = adw::ActionRow::builder()
+        .title("Workspace indicators on the top bar")
+        .subtitle("Show a clickable pill for each workspace in the top bar")
+        .build();
+    indicators_row.set_title_lines(1);
+    indicators_row.set_subtitle_lines(2);
+    let indicators_switch = gtk::Switch::new();
+    indicators_switch.set_active(input.config.borrow().interface.show_workspace_indicators);
+    indicators_switch.set_valign(gtk::Align::Center);
+    indicators_row.add_suffix(&indicators_switch);
+    indicators_row.set_activatable_widget(Some(&indicators_switch));
+    group.add(&indicators_row);
+
     let controls_row = adw::ActionRow::builder()
         .title("Window controls side")
         .subtitle("Place close, minimize, and maximize on the left or right of the top bar (or of the sidebar header when the top bar is off)")
@@ -244,6 +257,16 @@ fn build_general_page(input: &SettingsEditorInput) -> gtk::Widget {
             let show_top_bar = switch.is_active();
             apply_config_change(&config, &*on_changed, move |c| {
                 c.interface.show_top_bar = show_top_bar;
+            });
+        });
+    }
+    {
+        let config = input.config.clone();
+        let on_changed = input.on_config_changed.clone();
+        indicators_switch.connect_active_notify(move |switch| {
+            let show_workspace_indicators = switch.is_active();
+            apply_config_change(&config, &*on_changed, move |c| {
+                c.interface.show_workspace_indicators = show_workspace_indicators;
             });
         });
     }
