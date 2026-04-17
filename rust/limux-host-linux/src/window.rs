@@ -5808,9 +5808,8 @@ fn browser_tab_new(
     // Workspace id + walker context.
     let workspace_id = {
         let app_state = state.borrow();
-        let idx = workspace_index_for_target(&app_state, target).ok_or_else(|| {
-            crate::control_bridge::BridgeError::not_found("workspace not found")
-        })?;
+        let idx = workspace_index_for_target(&app_state, target)
+            .ok_or_else(|| crate::control_bridge::BridgeError::not_found("workspace not found"))?;
         app_state.workspaces[idx].id.clone()
     };
 
@@ -5883,8 +5882,8 @@ fn browser_tab_new(
         }
     }
 
-    let pane_widget = chosen
-        .ok_or_else(|| crate::control_bridge::BridgeError::not_found("pane not found"))?;
+    let pane_widget =
+        chosen.ok_or_else(|| crate::control_bridge::BridgeError::not_found("pane not found"))?;
 
     let resolved_url = url.unwrap_or_else(|| "about:blank".to_string());
     let new_surface_id = pane::add_browser_tab_returning_id(&pane_widget, Some(&resolved_url))
@@ -5914,9 +5913,8 @@ fn browser_tab_new(
 fn browser_tab_switch(
     surface: &str,
 ) -> Result<serde_json::Value, crate::control_bridge::BridgeError> {
-    let pane_widget = pane::find_pane_widget_for_surface(surface).ok_or_else(|| {
-        crate::control_bridge::BridgeError::not_found("surface not found")
-    })?;
+    let pane_widget = pane::find_pane_widget_for_surface(surface)
+        .ok_or_else(|| crate::control_bridge::BridgeError::not_found("surface not found"))?;
     let ok = pane::activate_tab_in_pane_by_id(&pane_widget, surface);
     Ok(serde_json::json!({
         "surface_id": surface,
@@ -5928,9 +5926,8 @@ fn browser_tab_switch(
 fn browser_tab_close(
     surface: &str,
 ) -> Result<serde_json::Value, crate::control_bridge::BridgeError> {
-    let pane_widget = pane::find_pane_widget_for_surface(surface).ok_or_else(|| {
-        crate::control_bridge::BridgeError::not_found("surface not found")
-    })?;
+    let pane_widget = pane::find_pane_widget_for_surface(surface)
+        .ok_or_else(|| crate::control_bridge::BridgeError::not_found("surface not found"))?;
     let ok = pane::close_tab_in_pane_by_id(&pane_widget, surface);
     Ok(serde_json::json!({
         "surface_id": surface,

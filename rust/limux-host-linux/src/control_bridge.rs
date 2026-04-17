@@ -960,7 +960,14 @@ fn handle_method(
             let pane = optional_string(params, &["pane_id", "pane_ref", "pane"])
                 .map(|p| p.strip_prefix("pane:").unwrap_or(&p).to_string());
             let (reply, rx) = mpsc::channel();
-            (ControlCommand::BrowserTabList { target, pane, reply }, rx)
+            (
+                ControlCommand::BrowserTabList {
+                    target,
+                    pane,
+                    reply,
+                },
+                rx,
+            )
         }
         "browser.tab.new" => {
             let target = match parse_optional_workspace_target(params, false) {
@@ -971,7 +978,15 @@ fn handle_method(
                 .map(|p| p.strip_prefix("pane:").unwrap_or(&p).to_string());
             let url = optional_string(params, &["url"]);
             let (reply, rx) = mpsc::channel();
-            (ControlCommand::BrowserTabNew { target, pane, url, reply }, rx)
+            (
+                ControlCommand::BrowserTabNew {
+                    target,
+                    pane,
+                    url,
+                    reply,
+                },
+                rx,
+            )
         }
         "browser.tab.switch" => {
             let surface = match required_string(params, &["surface_id", "id"], "surface_id") {
@@ -1000,7 +1015,11 @@ fn handle_method(
             };
             let (reply, rx) = mpsc::channel();
             (
-                ControlCommand::BrowserAddInitScript { surface, script, reply },
+                ControlCommand::BrowserAddInitScript {
+                    surface,
+                    script,
+                    reply,
+                },
                 rx,
             )
         }
@@ -1015,7 +1034,11 @@ fn handle_method(
             };
             let (reply, rx) = mpsc::channel();
             (
-                ControlCommand::BrowserAddStyle { surface, css, reply },
+                ControlCommand::BrowserAddStyle {
+                    surface,
+                    css,
+                    reply,
+                },
                 rx,
             )
         }
@@ -1231,7 +1254,8 @@ fn browser_cookies_get() -> String {
                 : { name: pair, value: "" };
         });
         return JSON.stringify({ ok: true, cookies, origin: location.origin });
-    })()"#.to_string()
+    })()"#
+        .to_string()
 }
 
 /// Clear every cookie visible to the current origin by overwriting with an
@@ -1258,7 +1282,8 @@ fn browser_cookies_clear(params: &Map<String, Value>) -> String {
                 document.cookie = name + "=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT";
             }
             return JSON.stringify({ ok: true, cleared: names });
-        })()"#.to_string(),
+        })()"#
+            .to_string(),
     }
 }
 
@@ -1374,7 +1399,8 @@ fn browser_state_save(_params: &Map<String, Value>) -> Result<String, BridgeErro
             local_storage: dumpStore(localStorage),
             session_storage: dumpStore(sessionStorage),
         });
-    })()"#.to_string())
+    })()"#
+        .to_string())
 }
 
 /// Apply a saved state bundle. Caller passes the `bundle` object (already

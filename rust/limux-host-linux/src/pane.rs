@@ -710,7 +710,12 @@ pub fn close_tab_in_pane_by_id(pane_widget: &gtk::Widget, tab_id: &str) -> bool 
             None => return false,
         }
     };
-    let exists = internals.tab_state.borrow().tabs.iter().any(|e| e.id == tab_id);
+    let exists = internals
+        .tab_state
+        .borrow()
+        .tabs
+        .iter()
+        .any(|e| e.id == tab_id);
     if !exists {
         return false;
     }
@@ -732,7 +737,12 @@ pub fn activate_tab_in_pane_by_id(pane_widget: &gtk::Widget, tab_id: &str) -> bo
     let Some(internals) = find_pane_internals(pane_widget) else {
         return false;
     };
-    let exists = internals.tab_state.borrow().tabs.iter().any(|e| e.id == tab_id);
+    let exists = internals
+        .tab_state
+        .borrow()
+        .tabs
+        .iter()
+        .any(|e| e.id == tab_id);
     if !exists {
         return false;
     }
@@ -3173,10 +3183,8 @@ impl BrowserShortcutTarget {
                                 if !raw.is_empty() && raw != "[object Promise]" {
                                     cb(Ok(raw.to_string()));
                                 } else {
-                                    let json = value
-                                        .to_json(0)
-                                        .map(|g| g.to_string())
-                                        .unwrap_or_default();
+                                    let json =
+                                        value.to_json(0).map(|g| g.to_string()).unwrap_or_default();
                                     cb(Ok(json));
                                 }
                             }
