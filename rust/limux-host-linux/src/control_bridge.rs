@@ -71,6 +71,16 @@ const METHODS: &[&str] = &[
     "browser.errors.clear",
     "browser.is_ready",
     "browser.is_editable",
+    "browser.cookies.get",
+    "browser.cookies.clear",
+    "browser.storage.local.get",
+    "browser.storage.local.set",
+    "browser.storage.local.clear",
+    "browser.storage.session.get",
+    "browser.storage.session.set",
+    "browser.storage.session.clear",
+    "browser.state.save",
+    "browser.state.load",
 ];
 
 const PARSE_ERROR_CODE: i64 = -32700;
@@ -766,10 +776,199 @@ fn build_browser_script(
             r#"JSON.stringify({ editable: !!(window.__limux && window.__limux.isEditable()) })"#.to_string(),
             None,
         )),
+        "browser.cookies.get" => Ok((browser_cookies_get(), None)),
+        "browser.cookies.clear" => Ok((browser_cookies_clear(params), None)),
+        "browser.storage.local.get" => Ok((browser_storage_get("localStorage", params), None)),
+        "browser.storage.local.set" => Ok((browser_storage_set("localStorage", params)?, None)),
+        "browser.storage.local.clear" => Ok((browser_storage_clear("localStorage"), None)),
+        "browser.storage.session.get" => Ok((browser_storage_get("sessionStorage", params), None)),
+        "browser.storage.session.set" => Ok((browser_storage_set("sessionStorage", params)?, None)),
+        "browser.storage.session.clear" => Ok((browser_storage_clear("sessionStorage"), None)),
+        "browser.state.save" => Ok((browser_state_save(params)?, None)),
+        "browser.state.load" => Ok((browser_state_load(params)?, None)),
         _ => Err(BridgeError::invalid_params(format!(
             "no browser script for {method}"
         ))),
     }
+}
+
+/// Return all cookies visible to `document.cookie` (same-origin, non-HttpOnly).
+/// HttpOnly session cookies are intentionally hidden from scripts by the
+/// browser, but they are persisted in the NetworkSession sqlite store so
+/// login state survives relaunches without an explicit save/load.
+fn browser_cookies_get() -> String {
+    r#"(() => {
+        const raw = document.cookie || "";
+        const cookies = raw.split(/;\s*/).filter(Boolean).map(pair => {
+            const i = pair.indexOf("=");
+            return i >= 0
+                ? { name: pair.slice(0, i), value: decodeURIComponent(pair.slice(i + 1)) }
+                : { name: pair, value: "" };
+        });
+        return JSON.stringify({ ok: true, cookies, origin: location.origin });
+    })()"#.to_string()
+}
+
+/// Clear every cookie visible to the current origin by overwriting with an
+/// expired date. HttpOnly cookies remain untouched because they aren't
+/// visible to scripts; use browser.navigate to a fresh origin + clear there,
+/// or rely on the sqlite store for persistent invalidation.
+fn browser_cookies_clear(params: &Map<String, Value>) -> String {
+    let name = optional_string(params, &["name"]);
+    match name {
+        Some(n) => format!(
+            r#"(() => {{
+                const name = {n};
+                document.cookie = name + "=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT";
+                return JSON.stringify({{ ok: true, cleared: [name] }});
+            }})()"#,
+            n = js_literal(&n)
+        ),
+        None => r#"(() => {
+            const names = (document.cookie || "").split(/;\s*/).filter(Boolean).map(p => {
+                const i = p.indexOf("=");
+                return i >= 0 ? p.slice(0, i) : p;
+            });
+            for (const name of names) {
+                document.cookie = name + "=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT";
+            }
+            return JSON.stringify({ ok: true, cleared: names });
+        })()"#.to_string(),
+    }
+}
+
+fn browser_storage_get(kind: &str, params: &Map<String, Value>) -> String {
+    let key = optional_string(params, &["key", "name"]);
+    match key {
+        Some(k) => format!(
+            r#"(() => {{
+                const store = {kind};
+                const key = {k};
+                return JSON.stringify({{ ok: true, key, value: store.getItem(key) }});
+            }})()"#,
+            kind = kind,
+            k = js_literal(&k)
+        ),
+        None => format!(
+            r#"(() => {{
+                const store = {kind};
+                const all = {{}};
+                for (let i = 0; i < store.length; i++) {{
+                    const key = store.key(i);
+                    if (key != null) all[key] = store.getItem(key);
+                }}
+                return JSON.stringify({{ ok: true, items: all }});
+            }})()"#,
+            kind = kind
+        ),
+    }
+}
+
+fn browser_storage_set(kind: &str, params: &Map<String, Value>) -> Result<String, BridgeError> {
+    let key = required_string(params, &["key", "name"], "key")?;
+    let value = optional_string(params, &["value"]).unwrap_or_default();
+    Ok(format!(
+        r#"(() => {{
+            try {{
+                {kind}.setItem({k}, {v});
+                return JSON.stringify({{ ok: true, key: {k} }});
+            }} catch (e) {{
+                return JSON.stringify({{ ok: false, error: {{ code: "STORAGE_ERROR", message: String(e && e.message || e) }} }});
+            }}
+        }})()"#,
+        kind = kind,
+        k = js_literal(&key),
+        v = js_literal(&value)
+    ))
+}
+
+fn browser_storage_clear(kind: &str) -> String {
+    format!(
+        r#"(() => {{ {kind}.clear(); return JSON.stringify({{ ok: true }}); }})()"#,
+        kind = kind
+    )
+}
+
+/// Dump visible cookies + localStorage + sessionStorage for the current page.
+/// The caller provides `path` — the server writes the JSON bundle via
+/// std::fs::write in a follow-up step triggered by the `wrap_key` fallout.
+/// For now this returns the bundle inline; writing to disk is the caller's
+/// responsibility until we add a `ControlCommand::BrowserStateSave` variant
+/// that can touch the filesystem.
+fn browser_state_save(_params: &Map<String, Value>) -> Result<String, BridgeError> {
+    Ok(r#"(() => {
+        const dumpStore = (store) => {
+            const out = {};
+            for (let i = 0; i < store.length; i++) {
+                const k = store.key(i);
+                if (k != null) out[k] = store.getItem(k);
+            }
+            return out;
+        };
+        const cookies = (document.cookie || "").split(/;\s*/).filter(Boolean).map(pair => {
+            const i = pair.indexOf("=");
+            return i >= 0 ? { name: pair.slice(0, i), value: decodeURIComponent(pair.slice(i + 1)) }
+                          : { name: pair, value: "" };
+        });
+        return JSON.stringify({
+            ok: true,
+            version: 1,
+            url: location.href,
+            origin: location.origin,
+            cookies,
+            local_storage: dumpStore(localStorage),
+            session_storage: dumpStore(sessionStorage),
+        });
+    })()"#.to_string())
+}
+
+/// Apply a saved state bundle. Caller passes the `bundle` object (already
+/// parsed from JSON on the client side). Cookies must match the current
+/// origin; we don't attempt cross-origin injection.
+fn browser_state_load(params: &Map<String, Value>) -> Result<String, BridgeError> {
+    let bundle = params
+        .get("bundle")
+        .or_else(|| params.get("state"))
+        .ok_or_else(|| BridgeError::invalid_params("bundle required"))?;
+    let bundle_literal = serde_json::to_string(bundle)
+        .map_err(|e| BridgeError::invalid_params(format!("bundle not serializable: {e}")))?;
+    Ok(format!(
+        r#"((bundle) => {{
+            try {{
+                if (!bundle || typeof bundle !== "object") {{
+                    return JSON.stringify({{ ok: false, error: {{ code: "INVALID_BUNDLE", message: "bundle must be an object" }} }});
+                }}
+                if (bundle.local_storage && typeof bundle.local_storage === "object") {{
+                    for (const [k, v] of Object.entries(bundle.local_storage)) {{
+                        try {{ localStorage.setItem(k, v); }} catch (_) {{}}
+                    }}
+                }}
+                if (bundle.session_storage && typeof bundle.session_storage === "object") {{
+                    for (const [k, v] of Object.entries(bundle.session_storage)) {{
+                        try {{ sessionStorage.setItem(k, v); }} catch (_) {{}}
+                    }}
+                }}
+                if (Array.isArray(bundle.cookies)) {{
+                    for (const c of bundle.cookies) {{
+                        if (c && typeof c.name === "string") {{
+                            document.cookie = c.name + "=" + encodeURIComponent(c.value || "") + "; path=/";
+                        }}
+                    }}
+                }}
+                return JSON.stringify({{
+                    ok: true,
+                    applied: {{
+                        cookies: Array.isArray(bundle.cookies) ? bundle.cookies.length : 0,
+                        local_storage: bundle.local_storage ? Object.keys(bundle.local_storage).length : 0,
+                        session_storage: bundle.session_storage ? Object.keys(bundle.session_storage).length : 0,
+                    }}
+                }});
+            }} catch (e) {{
+                return JSON.stringify({{ ok: false, error: {{ code: "LOAD_ERROR", message: String(e && e.message || e) }} }});
+            }}
+        }})({bundle})"#,
+        bundle = bundle_literal
+    ))
 }
 
 fn snapshot_opts(params: &Map<String, Value>) -> String {

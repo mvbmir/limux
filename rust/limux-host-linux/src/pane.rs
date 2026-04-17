@@ -2976,6 +2976,18 @@ const LIMUX_BROWSER_EDITABLE_STATE_SCRIPT: &str = r#"
 "#;
 
 #[cfg(feature = "webkit")]
+fn cookie_storage_path() -> std::path::PathBuf {
+    dirs::data_dir()
+        .unwrap_or_else(|| {
+            dirs::home_dir()
+                .unwrap_or_else(|| std::path::PathBuf::from("."))
+                .join(".local/share")
+        })
+        .join("limux")
+        .join("cookies.sqlite")
+}
+
+#[cfg(feature = "webkit")]
 fn create_browser_widget(
     initial_uri: Option<&str>,
     saved_uri: Rc<RefCell<Option<String>>>,
@@ -2985,6 +2997,20 @@ fn create_browser_widget(
 
     // Use a NetworkSession to avoid sandbox issues
     let network_session = webkit6::NetworkSession::default();
+    // Enable persistent cookie storage so logins survive limux relaunches.
+    // Idempotent across webviews — the same NetworkSession singleton backs
+    // every browser tab, so calling set_persistent_storage here affects the
+    // whole app.
+    if let Some(cookie_manager) = network_session.as_ref().and_then(|ns| ns.cookie_manager()) {
+        let cookies_path = cookie_storage_path();
+        if let Some(parent) = cookies_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        cookie_manager.set_persistent_storage(
+            &cookies_path.to_string_lossy(),
+            webkit6::CookiePersistentStorage::Sqlite,
+        );
+    }
     let web_context = webkit6::WebContext::default();
     let user_content_manager = webkit6::UserContentManager::new();
     let dom_editable = Rc::new(Cell::new(false));
