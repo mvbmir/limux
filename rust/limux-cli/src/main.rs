@@ -1105,10 +1105,7 @@ async fn run_browser(
                 if let Some(parent) = Path::new(out_path).parent() {
                     if !parent.as_os_str().is_empty() {
                         fs::create_dir_all(parent).with_context(|| {
-                            format!(
-                                "failed to create screenshot directory {}",
-                                parent.display()
-                            )
+                            format!("failed to create screenshot directory {}", parent.display())
                         })?;
                     }
                 }
