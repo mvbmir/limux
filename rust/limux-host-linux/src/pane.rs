@@ -2773,15 +2773,14 @@ impl BrowserShortcutTarget {
                     match result {
                         Ok(texture) => {
                             if texture.width() == 0 || texture.height() == 0 {
-                                cb(Err("snapshot texture empty; webview not yet rendered"
-                                    .to_string()));
+                                cb(Err(
+                                    "snapshot texture empty; webview not yet rendered".to_string()
+                                ));
                                 return;
                             }
                             match texture.save_to_png(&out_path) {
                                 Ok(()) => cb(Ok(out_path)),
-                                Err(error) => {
-                                    cb(Err(format!("snapshot save failed: {error}")))
-                                }
+                                Err(error) => cb(Err(format!("snapshot save failed: {error}"))),
                             }
                         }
                         Err(error) => cb(Err(error.to_string())),
@@ -2994,6 +2993,10 @@ impl BrowserHandles {
     }
 }
 
+pub const LIMUX_BROWSER_INIT_SCRIPT: &str = include_str!("browser_init.js");
+
+pub const LIMUX_BROWSER_SNAPSHOT_SCRIPT: &str = include_str!("browser_snapshot.js");
+
 #[cfg(feature = "webkit")]
 const LIMUX_BROWSER_EDITABLE_STATE_HANDLER: &str = "limuxEditableState";
 
@@ -3070,6 +3073,16 @@ fn create_browser_widget(
     user_content_manager.add_script(&webkit6::UserScript::new(
         LIMUX_BROWSER_EDITABLE_STATE_SCRIPT,
         webkit6::UserContentInjectedFrames::AllFrames,
+        webkit6::UserScriptInjectionTime::Start,
+        &[],
+        &[],
+    ));
+    // Install limux browser automation init script on every top-frame load,
+    // before any page script runs. Provides window.__limux with ref tagging,
+    // console/error ring buffers, history hooks, and ready/editable probes.
+    user_content_manager.add_script(&webkit6::UserScript::new(
+        LIMUX_BROWSER_INIT_SCRIPT,
+        webkit6::UserContentInjectedFrames::TopFrame,
         webkit6::UserScriptInjectionTime::Start,
         &[],
         &[],

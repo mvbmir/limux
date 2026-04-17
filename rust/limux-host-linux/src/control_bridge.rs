@@ -38,6 +38,39 @@ const METHODS: &[&str] = &[
     "browser.reload",
     "browser.screenshot",
     "browser.eval",
+    "browser.snapshot",
+    "browser.click",
+    "browser.dblclick",
+    "browser.hover",
+    "browser.focus",
+    "browser.fill",
+    "browser.type",
+    "browser.press",
+    "browser.check",
+    "browser.uncheck",
+    "browser.select",
+    "browser.scroll",
+    "browser.scroll_into_view",
+    "browser.wait",
+    "browser.wait_ready",
+    "browser.get.text",
+    "browser.get.title",
+    "browser.get.html",
+    "browser.get.value",
+    "browser.get.attr",
+    "browser.get.count",
+    "browser.get.box",
+    "browser.find.role",
+    "browser.find.text",
+    "browser.find.label",
+    "browser.find.placeholder",
+    "browser.find.testid",
+    "browser.console.list",
+    "browser.console.clear",
+    "browser.errors.list",
+    "browser.errors.clear",
+    "browser.is_ready",
+    "browser.is_editable",
 ];
 
 const PARSE_ERROR_CODE: i64 = -32700;
@@ -556,6 +589,26 @@ fn handle_method(
                 rx,
             )
         }
+        m if m.starts_with("browser.") => {
+            let surface = match required_string(params, &["surface_id", "id"], "surface_id") {
+                Ok(value) => normalize_handle(value, "surface:"),
+                Err(error) => return error_response(id, error),
+            };
+            let (script, wrap_key) = match build_browser_script(method, params) {
+                Ok(pair) => pair,
+                Err(error) => return error_response(id, error),
+            };
+            let (reply, rx) = mpsc::channel();
+            (
+                ControlCommand::BrowserEval {
+                    surface,
+                    script,
+                    wrap_key,
+                    reply,
+                },
+                rx,
+            )
+        }
         _ => {
             return error_response(
                 id,
@@ -588,6 +641,627 @@ fn command_timeout(command: &ControlCommand) -> Duration {
 
 fn error_response(id: Option<Value>, error: BridgeError) -> V2Response {
     V2Response::error(id, error.code, error.message, error.data)
+}
+
+fn js_literal(value: &str) -> String {
+    serde_json::Value::String(value.to_string()).to_string()
+}
+
+fn json_literal(value: &Value) -> String {
+    serde_json::to_string(value).unwrap_or_else(|_| "null".to_string())
+}
+
+/// JS that resolves a ref-or-selector to a DOM element. When the caller
+/// provides a ref (`eN`) the script also verifies attachment and rejects
+/// with structured REF_NOT_FOUND / STALE_REF errors rather than silently
+/// acting on a stale handle.
+fn resolve_target_js(handle_literal: &str) -> String {
+    format!(
+        r#"(() => {{
+            const handle = {h};
+            if (!handle) {{ return {{ err: {{ code: "INVALID_PARAMS", message: "selector or ref required" }} }}; }}
+            const trimmed = String(handle).replace(/^@/, "");
+            const refMatch = /^e\d+$/.test(trimmed);
+            if (refMatch) {{
+                if (!window.__limux) {{
+                    return {{ err: {{ code: "INIT_NOT_READY", message: "limux init script not installed" }} }};
+                }}
+                const info = window.__limux.refInfo(trimmed);
+                if (!info) {{ return {{ err: {{ code: "REF_NOT_FOUND", message: "ref " + trimmed + " unknown", ref: trimmed }} }}; }}
+                if (!info.attached) {{ return {{ err: {{ code: "REF_NOT_FOUND", message: "ref " + trimmed + " no longer attached", ref: trimmed }} }}; }}
+                const el = window.__limux.lookupRef(trimmed);
+                if (!el) {{ return {{ err: {{ code: "REF_NOT_FOUND", message: "ref " + trimmed + " not in DOM", ref: trimmed }} }}; }}
+                return {{ el, ref: trimmed, info }};
+            }}
+            try {{
+                const el = document.querySelector(String(handle));
+                if (!el) {{ return {{ err: {{ code: "REF_NOT_FOUND", message: "selector matched no element", selector: String(handle) }} }}; }}
+                return {{ el, selector: String(handle) }};
+            }} catch (e) {{
+                return {{ err: {{ code: "INVALID_SELECTOR", message: String(e && e.message || e), selector: String(handle) }} }};
+            }}
+        }})()"#,
+        h = handle_literal
+    )
+}
+
+/// Wrap a JS action so REF_NOT_FOUND / INVALID_SELECTOR / errors are
+/// returned as structured JSON (handler unwraps `err` into BridgeError).
+fn wrap_action_js(handle_literal: &str, body: &str) -> String {
+    format!(
+        r#"(() => {{
+            const target = {resolve};
+            if (target.err) {{ return JSON.stringify({{ ok: false, error: target.err }}); }}
+            const el = target.el;
+            try {{
+                {body}
+            }} catch (e) {{
+                return JSON.stringify({{ ok: false, error: {{ code: "INTERNAL", message: String(e && e.message || e) }} }});
+            }}
+        }})()"#,
+        resolve = resolve_target_js(handle_literal),
+        body = body,
+    )
+}
+
+/// Build JS payloads for browser.* methods. All scripts must return a
+/// JSON string; the handler parses it and either merges it into the
+/// response (when an object + `wrap_key` is None) or stores it under
+/// `wrap_key`.
+fn build_browser_script(
+    method: &str,
+    params: &Map<String, Value>,
+) -> Result<(String, Option<String>), BridgeError> {
+    match method {
+        "browser.snapshot" => {
+            let opts = snapshot_opts(params);
+            let script = crate::pane::LIMUX_BROWSER_SNAPSHOT_SCRIPT
+                .replace("__LIMUX_SNAPSHOT_OPTS__", &opts);
+            Ok((script, None))
+        }
+        "browser.click" => Ok((browser_action_click(params)?, None)),
+        "browser.dblclick" => Ok((browser_action_dblclick(params)?, None)),
+        "browser.hover" => Ok((browser_action_hover(params)?, None)),
+        "browser.focus" => Ok((browser_action_focus(params)?, None)),
+        "browser.fill" => Ok((browser_action_fill(params)?, None)),
+        "browser.type" => Ok((browser_action_type(params)?, None)),
+        "browser.press" => Ok((browser_action_press(params)?, None)),
+        "browser.check" => Ok((browser_action_toggle_checkable(params, true)?, None)),
+        "browser.uncheck" => Ok((browser_action_toggle_checkable(params, false)?, None)),
+        "browser.select" => Ok((browser_action_select(params)?, None)),
+        "browser.scroll" => Ok((browser_action_scroll(params)?, None)),
+        "browser.scroll_into_view" => Ok((browser_action_scroll_into_view(params)?, None)),
+        "browser.wait" => Ok((browser_action_wait(params)?, None)),
+        "browser.wait_ready" => Ok((browser_action_wait_ready(params)?, None)),
+        "browser.get.text" => Ok((browser_get_text(params)?, None)),
+        "browser.get.title" => Ok((
+            "JSON.stringify({ title: document.title })".to_string(),
+            None,
+        )),
+        "browser.get.html" => Ok((browser_get_html(params)?, None)),
+        "browser.get.value" => Ok((browser_get_value(params)?, None)),
+        "browser.get.attr" => Ok((browser_get_attr(params)?, None)),
+        "browser.get.count" => Ok((browser_get_count(params)?, None)),
+        "browser.get.box" => Ok((browser_get_box(params)?, None)),
+        "browser.find.role" => Ok((browser_find(params, "role")?, None)),
+        "browser.find.text" => Ok((browser_find(params, "text")?, None)),
+        "browser.find.label" => Ok((browser_find(params, "label")?, None)),
+        "browser.find.placeholder" => Ok((browser_find(params, "placeholder")?, None)),
+        "browser.find.testid" => Ok((browser_find(params, "testid")?, None)),
+        "browser.console.list" => Ok((browser_console_list(params)?, None)),
+        "browser.console.clear" => Ok((
+            r#"(() => { if (window.__limux) window.__limux.clearLogs(); return JSON.stringify({ ok: true }); })()"#.to_string(),
+            None,
+        )),
+        "browser.errors.list" => Ok((browser_errors_list(params)?, None)),
+        "browser.errors.clear" => Ok((
+            r#"(() => { if (window.__limux) window.__limux.clearErrors(); return JSON.stringify({ ok: true }); })()"#.to_string(),
+            None,
+        )),
+        "browser.is_ready" => Ok((
+            r#"JSON.stringify({ ready: !!(window.__limux && window.__limux.isReady()) })"#.to_string(),
+            None,
+        )),
+        "browser.is_editable" => Ok((
+            r#"JSON.stringify({ editable: !!(window.__limux && window.__limux.isEditable()) })"#.to_string(),
+            None,
+        )),
+        _ => Err(BridgeError::invalid_params(format!(
+            "no browser script for {method}"
+        ))),
+    }
+}
+
+fn snapshot_opts(params: &Map<String, Value>) -> String {
+    let mut obj = serde_json::Map::new();
+    if let Some(v) = params.get("full_tree") {
+        obj.insert("full_tree".into(), v.clone());
+    }
+    if let Some(v) = params.get("raw_html") {
+        obj.insert("raw_html".into(), v.clone());
+    }
+    if let Some(v) = params.get("selector") {
+        obj.insert("selector".into(), v.clone());
+    }
+    if let Some(v) = params.get("max_depth") {
+        obj.insert("max_depth".into(), v.clone());
+    }
+    if let Some(v) = params.get("since_hash") {
+        obj.insert("since_hash".into(), v.clone());
+    }
+    serde_json::to_string(&Value::Object(obj)).unwrap_or_else(|_| "{}".to_string())
+}
+
+fn target_handle(params: &Map<String, Value>) -> Result<String, BridgeError> {
+    if let Some(s) = optional_string(params, &["ref", "selector", "target"]) {
+        return Ok(s);
+    }
+    Err(BridgeError::invalid_params("ref or selector required"))
+}
+
+fn browser_action_click(params: &Map<String, Value>) -> Result<String, BridgeError> {
+    let handle = target_handle(params)?;
+    let body = r#"
+        if (typeof el.click === "function") { el.click(); }
+        else { el.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true })); }
+        return JSON.stringify({ ok: true, ref: target.ref, selector: target.selector });
+    "#;
+    Ok(wrap_action_js(&js_literal(&handle), body))
+}
+
+fn browser_action_dblclick(params: &Map<String, Value>) -> Result<String, BridgeError> {
+    let handle = target_handle(params)?;
+    let body = r#"
+        el.dispatchEvent(new MouseEvent("dblclick", { bubbles: true, cancelable: true }));
+        return JSON.stringify({ ok: true, ref: target.ref, selector: target.selector });
+    "#;
+    Ok(wrap_action_js(&js_literal(&handle), body))
+}
+
+fn browser_action_hover(params: &Map<String, Value>) -> Result<String, BridgeError> {
+    let handle = target_handle(params)?;
+    let body = r#"
+        el.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
+        el.dispatchEvent(new MouseEvent("mouseenter", { bubbles: false }));
+        return JSON.stringify({ ok: true, ref: target.ref, selector: target.selector });
+    "#;
+    Ok(wrap_action_js(&js_literal(&handle), body))
+}
+
+fn browser_action_focus(params: &Map<String, Value>) -> Result<String, BridgeError> {
+    let handle = target_handle(params)?;
+    let body = r#"
+        if (typeof el.focus === "function") el.focus();
+        return JSON.stringify({ ok: true, ref: target.ref, selector: target.selector });
+    "#;
+    Ok(wrap_action_js(&js_literal(&handle), body))
+}
+
+fn browser_action_fill(params: &Map<String, Value>) -> Result<String, BridgeError> {
+    let handle = target_handle(params)?;
+    let text = optional_string(params, &["text", "value"]).unwrap_or_default();
+    let body = format!(
+        r#"
+        const text = {text};
+        if (el.isContentEditable) {{
+            el.focus();
+            el.textContent = text;
+            el.dispatchEvent(new Event("input", {{ bubbles: true }}));
+        }} else if (el.tagName === "TEXTAREA" || el.tagName === "INPUT" || el.tagName === "SELECT") {{
+            const proto = el.tagName === "TEXTAREA" ? HTMLTextAreaElement.prototype
+                : el.tagName === "SELECT" ? HTMLSelectElement.prototype
+                : HTMLInputElement.prototype;
+            const setter = Object.getOwnPropertyDescriptor(proto, "value").set;
+            setter.call(el, text);
+            el.dispatchEvent(new Event("input", {{ bubbles: true }}));
+            el.dispatchEvent(new Event("change", {{ bubbles: true }}));
+        }} else {{
+            return JSON.stringify({{ ok: false, error: {{ code: "WRONG_ELEMENT", message: "cannot fill tag " + el.tagName }} }});
+        }}
+        return JSON.stringify({{ ok: true, ref: target.ref, selector: target.selector }});
+    "#,
+        text = js_literal(&text)
+    );
+    Ok(wrap_action_js(&js_literal(&handle), &body))
+}
+
+fn browser_action_type(params: &Map<String, Value>) -> Result<String, BridgeError> {
+    // Dispatch keydown/keypress/keyup + input events for each char on the focused element.
+    let text = required_string(params, &["text"], "text")?;
+    let script = format!(
+        r#"(() => {{
+            const text = {text};
+            const el = document.activeElement;
+            if (!el) {{ return JSON.stringify({{ ok: false, error: {{ code: "NO_FOCUS", message: "no focused element" }} }}); }}
+            for (const ch of text) {{
+                el.dispatchEvent(new KeyboardEvent("keydown", {{ key: ch, bubbles: true }}));
+                el.dispatchEvent(new KeyboardEvent("keypress", {{ key: ch, bubbles: true }}));
+                if (el.tagName === "INPUT" || el.tagName === "TEXTAREA") {{
+                    const proto = el.tagName === "TEXTAREA" ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+                    const setter = Object.getOwnPropertyDescriptor(proto, "value").set;
+                    setter.call(el, (el.value || "") + ch);
+                    el.dispatchEvent(new Event("input", {{ bubbles: true }}));
+                }} else if (el.isContentEditable) {{
+                    el.textContent = (el.textContent || "") + ch;
+                    el.dispatchEvent(new Event("input", {{ bubbles: true }}));
+                }}
+                el.dispatchEvent(new KeyboardEvent("keyup", {{ key: ch, bubbles: true }}));
+            }}
+            return JSON.stringify({{ ok: true }});
+        }})()"#,
+        text = js_literal(&text)
+    );
+    Ok(script)
+}
+
+fn browser_action_press(params: &Map<String, Value>) -> Result<String, BridgeError> {
+    // keys = "Enter", "Ctrl+K", etc. Parse into key + modifier flags.
+    let keys = required_string(params, &["keys", "key"], "keys")?;
+    let script = format!(
+        r#"(() => {{
+            const raw = {keys};
+            const parts = String(raw).split("+").map(s => s.trim());
+            const key = parts.pop();
+            const mods = new Set(parts.map(s => s.toLowerCase()));
+            const el = document.activeElement || document.body;
+            const init = {{
+                key,
+                bubbles: true,
+                cancelable: true,
+                ctrlKey: mods.has("ctrl") || mods.has("control"),
+                altKey: mods.has("alt"),
+                shiftKey: mods.has("shift"),
+                metaKey: mods.has("meta") || mods.has("cmd") || mods.has("super"),
+            }};
+            el.dispatchEvent(new KeyboardEvent("keydown", init));
+            el.dispatchEvent(new KeyboardEvent("keypress", init));
+            el.dispatchEvent(new KeyboardEvent("keyup", init));
+            return JSON.stringify({{ ok: true, key, mods: [...mods] }});
+        }})()"#,
+        keys = js_literal(&keys)
+    );
+    Ok(script)
+}
+
+fn browser_action_toggle_checkable(
+    params: &Map<String, Value>,
+    desired: bool,
+) -> Result<String, BridgeError> {
+    let handle = target_handle(params)?;
+    let body = format!(
+        r#"
+        if (el.type !== "checkbox" && el.type !== "radio" && el.getAttribute("role") !== "checkbox" && el.getAttribute("role") !== "switch") {{
+            return JSON.stringify({{ ok: false, error: {{ code: "WRONG_ELEMENT", message: "not a checkable element" }} }});
+        }}
+        const want = {desired};
+        if (el.type === "radio") {{
+            if (want) {{ if (!el.checked) el.click(); }}
+            else {{ return JSON.stringify({{ ok: false, error: {{ code: "INVALID_OP", message: "cannot uncheck a radio" }} }}); }}
+        }} else if (el.checked !== want) {{
+            el.click();
+        }}
+        return JSON.stringify({{ ok: true, ref: target.ref, selector: target.selector, checked: !!el.checked }});
+    "#,
+        desired = desired
+    );
+    Ok(wrap_action_js(&js_literal(&handle), &body))
+}
+
+fn browser_action_select(params: &Map<String, Value>) -> Result<String, BridgeError> {
+    let handle = target_handle(params)?;
+    let option = required_string(params, &["option", "value", "label"], "option")?;
+    let body = format!(
+        r#"
+        if (el.tagName !== "SELECT") {{ return JSON.stringify({{ ok: false, error: {{ code: "WRONG_ELEMENT", message: "not a <select>" }} }}); }}
+        const want = {opt};
+        let matched = false;
+        for (const option of el.options) {{
+            if (option.value === want || option.label === want || option.text === want) {{
+                el.value = option.value;
+                matched = true;
+                break;
+            }}
+        }}
+        if (!matched) {{ return JSON.stringify({{ ok: false, error: {{ code: "OPTION_NOT_FOUND", message: "option not found", option: want }} }}); }}
+        el.dispatchEvent(new Event("input", {{ bubbles: true }}));
+        el.dispatchEvent(new Event("change", {{ bubbles: true }}));
+        return JSON.stringify({{ ok: true, ref: target.ref, selector: target.selector, value: el.value }});
+    "#,
+        opt = js_literal(&option)
+    );
+    Ok(wrap_action_js(&js_literal(&handle), &body))
+}
+
+fn browser_action_scroll(params: &Map<String, Value>) -> Result<String, BridgeError> {
+    let x = params.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let y = params.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let script = format!(
+        r#"(() => {{
+            window.scrollBy({{ left: {x}, top: {y}, behavior: "instant" }});
+            return JSON.stringify({{ ok: true, x: window.scrollX, y: window.scrollY }});
+        }})()"#
+    );
+    Ok(script)
+}
+
+fn browser_action_scroll_into_view(params: &Map<String, Value>) -> Result<String, BridgeError> {
+    let handle = target_handle(params)?;
+    let body = r#"
+        if (typeof el.scrollIntoView === "function") el.scrollIntoView({ behavior: "instant", block: "center", inline: "center" });
+        return JSON.stringify({ ok: true, ref: target.ref, selector: target.selector });
+    "#;
+    Ok(wrap_action_js(&js_literal(&handle), body))
+}
+
+fn browser_action_wait(params: &Map<String, Value>) -> Result<String, BridgeError> {
+    // Poll every 100ms up to timeout_ms (default 5000). Condition: either
+    // selector matches OR ref is attached OR document ready flag.
+    let selector = optional_string(params, &["selector"]);
+    let ref_id = optional_string(params, &["ref"]);
+    let timeout_ms = params
+        .get("timeout_ms")
+        .or_else(|| params.get("timeout"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(5000);
+    let ready_flag = params
+        .get("ready")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let script = format!(
+        r#"(async () => {{
+            const selector = {sel};
+            const refId = {rf};
+            const readyFlag = {ready};
+            const deadline = performance.now() + {timeout};
+            while (performance.now() < deadline) {{
+                if (readyFlag && window.__limux && window.__limux.isReady()) {{
+                    return JSON.stringify({{ ok: true, reason: "ready" }});
+                }}
+                if (selector) {{
+                    try {{
+                        const el = document.querySelector(selector);
+                        if (el) return JSON.stringify({{ ok: true, selector, reason: "selector" }});
+                    }} catch (e) {{
+                        return JSON.stringify({{ ok: false, error: {{ code: "INVALID_SELECTOR", message: String(e && e.message || e) }} }});
+                    }}
+                }}
+                if (refId) {{
+                    const info = window.__limux && window.__limux.refInfo(refId);
+                    if (info && info.attached) return JSON.stringify({{ ok: true, ref: refId, reason: "ref" }});
+                }}
+                await new Promise(r => setTimeout(r, 100));
+            }}
+            return JSON.stringify({{ ok: false, error: {{ code: "TIMEOUT", message: "wait timed out", timeout_ms: {timeout} }} }});
+        }})()"#,
+        sel = json_literal(&Value::from(selector)),
+        rf = json_literal(&Value::from(ref_id)),
+        ready = ready_flag,
+        timeout = timeout_ms
+    );
+    Ok(script)
+}
+
+fn browser_action_wait_ready(params: &Map<String, Value>) -> Result<String, BridgeError> {
+    let timeout_ms = params
+        .get("timeout_ms")
+        .or_else(|| params.get("timeout"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(30000);
+    let script = format!(
+        r#"(async () => {{
+            const deadline = performance.now() + {timeout};
+            while (performance.now() < deadline) {{
+                if (window.__limux && window.__limux.isReady()) {{
+                    return JSON.stringify({{ ok: true }});
+                }}
+                await new Promise(r => setTimeout(r, 100));
+            }}
+            return JSON.stringify({{ ok: false, error: {{ code: "TIMEOUT", message: "page not ready within " + {timeout} + "ms" }} }});
+        }})()"#,
+        timeout = timeout_ms
+    );
+    Ok(script)
+}
+
+fn browser_get_text(params: &Map<String, Value>) -> Result<String, BridgeError> {
+    let handle = optional_string(params, &["ref", "selector", "target"])
+        .unwrap_or_else(|| "body".to_string());
+    let body = r#"
+        const text = el.innerText || el.textContent || "";
+        return JSON.stringify({ ok: true, text });
+    "#;
+    Ok(wrap_action_js(&js_literal(&handle), body))
+}
+
+fn browser_get_html(params: &Map<String, Value>) -> Result<String, BridgeError> {
+    let handle = optional_string(params, &["ref", "selector", "target"]);
+    match handle {
+        Some(h) => {
+            let body = r#"
+                return JSON.stringify({ ok: true, html: el.outerHTML });
+            "#;
+            Ok(wrap_action_js(&js_literal(&h), body))
+        }
+        None => Ok(
+            r#"JSON.stringify({ ok: true, html: document.documentElement.outerHTML })"#.to_string(),
+        ),
+    }
+}
+
+fn browser_get_value(params: &Map<String, Value>) -> Result<String, BridgeError> {
+    let handle = target_handle(params)?;
+    let body = r#"
+        return JSON.stringify({ ok: true, value: el.value ?? null });
+    "#;
+    Ok(wrap_action_js(&js_literal(&handle), body))
+}
+
+fn browser_get_attr(params: &Map<String, Value>) -> Result<String, BridgeError> {
+    let handle = target_handle(params)?;
+    let name = required_string(params, &["attr", "name"], "attr")?;
+    let body = format!(
+        r#"
+        return JSON.stringify({{ ok: true, value: el.getAttribute({n}) }});
+    "#,
+        n = js_literal(&name)
+    );
+    Ok(wrap_action_js(&js_literal(&handle), &body))
+}
+
+fn browser_get_count(params: &Map<String, Value>) -> Result<String, BridgeError> {
+    let selector = required_string(params, &["selector"], "selector")?;
+    let script = format!(
+        r#"(() => {{
+            try {{
+                return JSON.stringify({{ ok: true, count: document.querySelectorAll({s}).length }});
+            }} catch (e) {{
+                return JSON.stringify({{ ok: false, error: {{ code: "INVALID_SELECTOR", message: String(e && e.message || e) }} }});
+            }}
+        }})()"#,
+        s = js_literal(&selector)
+    );
+    Ok(script)
+}
+
+fn browser_get_box(params: &Map<String, Value>) -> Result<String, BridgeError> {
+    let handle = target_handle(params)?;
+    let body = r#"
+        const r = el.getBoundingClientRect();
+        return JSON.stringify({ ok: true, box: { x: r.left, y: r.top, w: r.width, h: r.height } });
+    "#;
+    Ok(wrap_action_js(&js_literal(&handle), body))
+}
+
+fn browser_find(params: &Map<String, Value>, kind: &str) -> Result<String, BridgeError> {
+    let value = required_string(
+        params,
+        &[
+            "value",
+            "name",
+            "role",
+            "text",
+            "label",
+            "placeholder",
+            "testid",
+        ],
+        "value",
+    )?;
+    let script = format!(
+        r#"(() => {{
+            if (!window.__limux) return JSON.stringify({{ ok: false, error: {{ code: "INIT_NOT_READY", message: "init script not installed" }} }});
+            const kind = {kind};
+            const want = {v};
+            let el = null;
+            if (kind === "role") {{
+                const nodes = document.querySelectorAll("[role], a, button, input, select, textarea, summary, details");
+                for (const node of nodes) {{
+                    if (window.__limux.elementRole(node) === want) {{ el = node; break; }}
+                }}
+            }} else if (kind === "text") {{
+                // Prefer interactive elements with exact-text match so we
+                // don't accidentally target an ancestor wrapper.
+                const interactive = document.querySelectorAll(
+                    "a[href], button, input, select, textarea, summary, " +
+                    "[role=button], [role=link], [role=checkbox], [role=radio], " +
+                    "[role=menuitem], [role=tab], [role=option]"
+                );
+                for (const node of interactive) {{
+                    const label = ((node.innerText || node.textContent || "").trim()) || node.value || node.getAttribute("aria-label") || "";
+                    if (label === want) {{ el = node; break; }}
+                }}
+                if (!el) {{
+                    const all = document.querySelectorAll("h1, h2, h3, h4, h5, h6, label, [role=heading], [role=listitem], [role=alert]");
+                    for (const node of all) {{
+                        if ((node.innerText || node.textContent || "").trim() === want) {{ el = node; break; }}
+                    }}
+                }}
+            }} else if (kind === "label") {{
+                const label = document.querySelector("label");
+                const all = document.querySelectorAll("label");
+                for (const lbl of all) {{
+                    if ((lbl.textContent || "").trim() === want) {{
+                        if (lbl.htmlFor) el = document.getElementById(lbl.htmlFor);
+                        if (!el) el = lbl.querySelector("input, textarea, select");
+                        if (el) break;
+                    }}
+                }}
+            }} else if (kind === "placeholder") {{
+                el = document.querySelector('[placeholder="' + CSS.escape(want) + '"]');
+            }} else if (kind === "testid") {{
+                el = document.querySelector('[data-testid="' + CSS.escape(want) + '"]');
+                if (!el) el = document.querySelector('[data-test-id="' + CSS.escape(want) + '"]');
+            }}
+            if (!el) return JSON.stringify({{ ok: false, error: {{ code: "NOT_FOUND", message: "find." + kind + " matched nothing", query: want }} }});
+            const id = window.__limux.assignRef(el);
+            return JSON.stringify({{ ok: true, ref: id, role: window.__limux.elementRole(el), name: window.__limux.accessibleName(el) }});
+        }})()"#,
+        kind = js_literal(kind),
+        v = js_literal(&value)
+    );
+    Ok(script)
+}
+
+fn browser_console_list(params: &Map<String, Value>) -> Result<String, BridgeError> {
+    // `since` filters by monotonic seq number (returned in each entry). The
+    // caller records the largest `seq` it saw and passes it back next time.
+    // ts_ms is informational only — webkit6 clamps wall-clock to i32::MIN so
+    // seq is the only reliable ordering.
+    let since = params.get("since").and_then(|v| v.as_u64()).unwrap_or(0);
+    let clear_after = params
+        .get("clear_after")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let levels = optional_string(params, &["level", "levels"]);
+    let levels_filter = levels
+        .map(|s| {
+            let v: Vec<String> = s.split(',').map(|x| x.trim().to_string()).collect();
+            format!(
+                "[{}]",
+                v.iter()
+                    .map(|x| js_literal(x))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            )
+        })
+        .unwrap_or_else(|| "null".to_string());
+    let script = format!(
+        r#"(() => {{
+            if (!window.__limux) return JSON.stringify({{ logs: [], dropped: 0 }});
+            const since = {since};
+            const levels = {levels};
+            const logs = window.__limux.logs.filter(e => e.seq > since && (!levels || levels.includes(e.level)));
+            const dropped = window.__limux.logsDroppedCount;
+            const latest = logs.length ? logs[logs.length - 1].seq : since;
+            if ({clear}) window.__limux.clearLogs();
+            return JSON.stringify({{ logs, dropped, latest_seq: latest }});
+        }})()"#,
+        since = since,
+        levels = levels_filter,
+        clear = clear_after
+    );
+    Ok(script)
+}
+
+fn browser_errors_list(params: &Map<String, Value>) -> Result<String, BridgeError> {
+    let since = params.get("since").and_then(|v| v.as_u64()).unwrap_or(0);
+    let clear_after = params
+        .get("clear_after")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let script = format!(
+        r#"(() => {{
+            if (!window.__limux) return JSON.stringify({{ errors: [], dropped: 0 }});
+            const since = {since};
+            const errors = window.__limux.errors.filter(e => e.seq > since);
+            const dropped = window.__limux.errorsDroppedCount;
+            const latest = errors.length ? errors[errors.length - 1].seq : since;
+            if ({clear}) window.__limux.clearErrors();
+            return JSON.stringify({{ errors, dropped, latest_seq: latest }});
+        }})()"#,
+        since = since,
+        clear = clear_after
+    );
+    Ok(script)
 }
 
 fn dispatch_request(input: &str, dispatch: &dyn Fn(ControlCommand)) -> V2Response {
