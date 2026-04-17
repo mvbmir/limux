@@ -106,6 +106,10 @@ pub enum TabContentState {
     Terminal {
         #[serde(default)]
         cwd: Option<String>,
+        // Session UUID of the most-recently-active `claude` conversation in `cwd`
+        // when this tab was last snapshotted. Used on restore to auto-`claude --resume`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        claude_session: Option<String>,
     },
     Browser {
         #[serde(default)]
@@ -166,12 +170,21 @@ impl PaneState {
 
 impl TabState {
     pub fn terminal(id: impl Into<String>, cwd: Option<&str>) -> Self {
+        Self::terminal_with_session(id, cwd, None)
+    }
+
+    pub fn terminal_with_session(
+        id: impl Into<String>,
+        cwd: Option<&str>,
+        claude_session: Option<String>,
+    ) -> Self {
         Self {
             id: id.into(),
             custom_name: None,
             pinned: false,
             content: TabContentState::Terminal {
                 cwd: cwd.map(|value| value.to_string()),
+                claude_session,
             },
         }
     }
@@ -520,8 +533,12 @@ mod tests {
         };
         assert_eq!(pane.tabs.len(), 1);
         match &pane.tabs[0].content {
-            TabContentState::Terminal { cwd } => {
+            TabContentState::Terminal {
+                cwd,
+                claude_session,
+            } => {
                 assert_eq!(cwd.as_deref(), Some("/tmp/project"));
+                assert!(claude_session.is_none());
             }
             other => panic!("expected terminal tab, got {other:?}"),
         }
@@ -619,8 +636,12 @@ mod tests {
         };
         assert_eq!(pane.tabs.len(), 1);
         match &pane.tabs[0].content {
-            TabContentState::Terminal { cwd } => {
+            TabContentState::Terminal {
+                cwd,
+                claude_session,
+            } => {
                 assert_eq!(cwd.as_deref(), Some("/tmp/project"));
+                assert!(claude_session.is_none());
             }
             other => panic!("expected terminal fallback, got {other:?}"),
         }
