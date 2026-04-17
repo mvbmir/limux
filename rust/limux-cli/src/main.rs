@@ -1099,23 +1099,22 @@ async fn run_browser(
             let sid = surface
                 .clone()
                 .ok_or_else(|| anyhow!("browser screenshot requires a surface"))?;
-            let mut payload =
-                browser_call(client, Some(sid), "browser.screenshot", Map::new()).await?;
             let out = parse_opt(&browser_args, "--out");
-            let mut path = get_string(&payload, &["path"])
-                .unwrap_or_else(|| "/tmp/limux-browser-shot.png".to_string());
-            if let Some(out_path) = out {
-                path = out_path;
-            }
-            if !Path::new(&path).exists() {
-                if let Some(parent) = Path::new(&path).parent() {
-                    fs::create_dir_all(parent).with_context(|| {
-                        format!("failed to create screenshot directory {}", parent.display())
-                    })?;
+            let mut params = Map::new();
+            if let Some(ref out_path) = out {
+                if let Some(parent) = Path::new(out_path).parent() {
+                    if !parent.as_os_str().is_empty() {
+                        fs::create_dir_all(parent).with_context(|| {
+                            format!("failed to create screenshot directory {}", parent.display())
+                        })?;
+                    }
                 }
-                fs::write(&path, [])
-                    .with_context(|| format!("failed to create screenshot {}", path))?;
+                params.insert("path".to_string(), Value::String(out_path.clone()));
             }
+            let mut payload = browser_call(client, Some(sid), "browser.screenshot", params).await?;
+            let path = get_string(&payload, &["path"])
+                .or(out)
+                .unwrap_or_else(|| "/tmp/limux-browser-shot.png".to_string());
             let url = format!("file://{}", path);
             if let Some(obj) = payload.as_object_mut() {
                 obj.insert("path".to_string(), Value::String(path.clone()));
