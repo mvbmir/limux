@@ -187,6 +187,20 @@ pub struct PaneCallbacks {
 struct TerminalTabState {
     cwd: Rc<RefCell<Option<String>>>,
     handle: terminal::TerminalHandle,
+    // Stable per-tab Claude session UUID. Either (a) loaded from persisted
+    // state on restore, or (b) freshly generated when the tab is created.
+    // The shell inherits this value as `LIMUX_CLAUDE_SESSION_ID`; the
+    // bundled wrapper script forces fresh `claude` invocations to use it.
+    //
+    // This is the *default* session id. It can be overridden at runtime if
+    // the user opens a different conversation via `/resume` inside Claude —
+    // see `live_claude_session` below, which the background poller keeps in
+    // sync with Claude's own `~/.claude/sessions/<pid>.json` status file.
+    claude_session_id: String,
+    // Most recent session UUID observed in the claude process attached to
+    // this tab. Sticky: we hold onto the last value even after claude exits
+    // so the next snapshot still persists the right session to resume.
+    live_claude_session: Rc<RefCell<Option<String>>>,
 }
 
 #[derive(Clone)]
@@ -804,6 +818,26 @@ fn next_tab_id() -> String {
     uuid::Uuid::new_v4().to_string()
 }
 
+/// Watch the `claude` process attached to `tab_id` and mirror its current
+/// session UUID into `live_session`. Runs on the GTK main loop at 1 Hz and
+/// self-terminates once the tab's strong `Rc` is dropped (i.e. the tab is
+/// closed), via a weak reference upgrade check.
+fn spawn_claude_session_poller(tab_id: String, live_session: &Rc<RefCell<Option<String>>>) {
+    let weak = Rc::downgrade(live_session);
+    glib::timeout_add_local(std::time::Duration::from_secs(1), move || {
+        let Some(cell) = weak.upgrade() else {
+            return glib::ControlFlow::Break;
+        };
+        if let Some(uuid) = crate::claude_session::detect_active_session_for_tab(&tab_id) {
+            let mut slot = cell.borrow_mut();
+            if slot.as_deref() != Some(uuid.as_str()) {
+                *slot = Some(uuid);
+            }
+        }
+        glib::ControlFlow::Continue
+    });
+}
+
 // ---------------------------------------------------------------------------
 // Icon button helper
 // ---------------------------------------------------------------------------
@@ -865,6 +899,12 @@ struct TerminalTabOptions<'a> {
     custom_name: Option<&'a str>,
     pinned: bool,
     cwd: Option<&'a str>,
+    // When `Some`, Ghostty spawns this command instead of the user's shell.
+    // Used to auto-resume a Claude session when restoring from persisted state.
+    startup_command: Option<String>,
+    // Persisted Claude session UUID for this tab. `None` on fresh tabs;
+    // `Some` when the tab is being restored from `session.json`.
+    claude_session_id: Option<String>,
 }
 
 struct BrowserTabOptions<'a> {
@@ -898,16 +938,33 @@ fn restore_tabs_from_state(
 
     for saved_tab in &saved_state.tabs {
         match &saved_tab.content {
-            TabContentState::Terminal { cwd } => add_terminal_tab_inner(
-                internals,
-                cwd.as_deref().or(working_directory),
-                Some(TerminalTabOptions {
-                    id: Some(saved_tab.id.as_str()),
-                    custom_name: saved_tab.custom_name.as_deref(),
-                    pinned: saved_tab.pinned,
-                    cwd: cwd.as_deref().or(working_directory),
-                }),
-            ),
+            TabContentState::Terminal {
+                cwd,
+                claude_session,
+            } => {
+                let effective_cwd = cwd.as_deref().or(working_directory);
+                // Re-resume only when the session JSONL is still on disk —
+                // otherwise we'd drop the user at a hang/error. `claude_session`
+                // stays on the tab either way so the next quit re-persists it.
+                let startup_command = claude_session.as_deref().and_then(|uuid| {
+                    effective_cwd.and_then(|cwd| {
+                        crate::claude_session::session_file_exists(cwd, uuid)
+                            .then(|| crate::claude_session::resume_command(uuid))
+                    })
+                });
+                add_terminal_tab_inner(
+                    internals,
+                    effective_cwd,
+                    Some(TerminalTabOptions {
+                        id: Some(saved_tab.id.as_str()),
+                        custom_name: saved_tab.custom_name.as_deref(),
+                        pinned: saved_tab.pinned,
+                        cwd: effective_cwd,
+                        startup_command,
+                        claude_session_id: claude_session.clone(),
+                    }),
+                );
+            }
             TabContentState::Browser { uri } => add_browser_tab_inner(
                 internals,
                 Some(BrowserTabOptions {
@@ -1100,16 +1157,29 @@ fn add_terminal_tab_inner(
         })
     };
 
+    let startup_command = options
+        .as_ref()
+        .and_then(|value| value.startup_command.clone());
+    let claude_session_id = options
+        .as_ref()
+        .and_then(|value| value.claude_session_id.clone())
+        .unwrap_or_else(crate::claude_session::new_session_id);
     let term = terminal::create_terminal(
         working_directory,
         terminal::TerminalOptions {
             hover_focus,
             saved_font_size: (internals.callbacks.current_config)().borrow().font_size,
+            startup_command,
+            tab_id: Some(tab_id.clone()),
+            claude_session_id: Some(claude_session_id.clone()),
         },
         term_callbacks,
     );
     let widget: gtk::Widget = term.overlay.clone().upcast();
     internals.content_stack.add_named(&widget, Some(&tab_id));
+
+    let live_session: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
+    spawn_claude_session_poller(tab_id.clone(), &live_session);
 
     {
         let mut ts = internals.tab_state.borrow_mut();
@@ -1126,6 +1196,8 @@ fn add_terminal_tab_inner(
                 state: TerminalTabState {
                     cwd: term_cwd.clone(),
                     handle: term.handle.clone(),
+                    claude_session_id,
+                    live_claude_session: live_session.clone(),
                 },
             },
         });
@@ -1422,9 +1494,23 @@ pub fn snapshot_pane_state(pane_widget: &gtk::Widget) -> Option<PaneState> {
         .iter()
         .map(|entry| {
             let content = match &entry.kind {
-                TabKind::Terminal { state } => TabContentState::Terminal {
-                    cwd: state.cwd.borrow().clone(),
-                },
+                TabKind::Terminal { state } => {
+                    let cwd = state.cwd.borrow().clone();
+                    // Prefer the live UUID the poller observed inside this
+                    // specific tab's claude process (this is what picks up
+                    // `/resume` switches made from Claude's own UI). Fall back
+                    // to the stable pre-generated UUID otherwise — that's the
+                    // one the wrapper pins fresh `claude` invocations to.
+                    let claude_session = state
+                        .live_claude_session
+                        .borrow()
+                        .clone()
+                        .unwrap_or_else(|| state.claude_session_id.clone());
+                    TabContentState::Terminal {
+                        cwd,
+                        claude_session: Some(claude_session),
+                    }
+                }
                 TabKind::Browser { state } => TabContentState::Browser {
                     uri: state.uri.borrow().clone(),
                 },
