@@ -4388,6 +4388,10 @@ fn split_pane(
     new_pane.upcast()
 }
 
+fn remove_pane(state: &State, ws_id: &str, pane_widget: &gtk::Widget) {
+    remove_pane_internal(state, ws_id, pane_widget, true);
+}
+
 fn remove_pane_internal(state: &State, ws_id: &str, pane_widget: &gtk::Widget, persist: bool) {
     let container = {
         let s = state.borrow();
@@ -4673,11 +4677,15 @@ fn cycle_focused_pane_tab(state: &State, delta: i32) {
 }
 
 fn close_focused_tab(state: &State) {
-    if let Some((_ws_id, pane_widget)) = find_focused_pane(state) {
-        // Close the active tab inside the pane. When the last tab closes, the
-        // pane's on_empty callback triggers remove_pane_internal, which removes
-        // the pane (or the whole workspace if it was the last pane).
-        pane::close_active_tab_in_pane(&pane_widget);
+    if let Some((ws_id, pane_widget)) = find_focused_pane(state) {
+        let parent = pane_widget.parent();
+        // If this is the only pane (parent is Stack), don't close — keep workspace alive
+        if let Some(ref p) = parent {
+            if p.downcast_ref::<gtk::Stack>().is_some() {
+                return;
+            }
+        }
+        remove_pane(state, &ws_id, &pane_widget);
     }
 }
 
