@@ -28,6 +28,7 @@ pub enum ShortcutId {
     NewTerminalInFocusedPane,
     SplitRight,
     CloseFocusedPane,
+    CloseFocusedTab,
     NewTerminal,
     FocusLeft,
     FocusRight,
@@ -79,6 +80,7 @@ pub enum ShortcutCommand {
     NewTerminal,
     SplitRight,
     CloseFocusedPane,
+    CloseFocusedTab,
     FocusLeft,
     FocusRight,
     FocusUp,
@@ -308,7 +310,7 @@ struct ShortcutConfigFile {
     shortcuts: HashMap<String, serde_json::Value>,
 }
 
-const SHORTCUT_DEFINITIONS: [ShortcutDefinition; 47] = [
+const SHORTCUT_DEFINITIONS: [ShortcutDefinition; 48] = [
     ShortcutDefinition {
         id: ShortcutId::NewWorkspace,
         config_key: "new_workspace",
@@ -464,10 +466,21 @@ const SHORTCUT_DEFINITIONS: [ShortcutDefinition; 47] = [
         editable_capture_policy: EditableCapturePolicy::BypassInEditable,
     },
     ShortcutDefinition {
+        id: ShortcutId::CloseFocusedTab,
+        config_key: "close_focused_tab",
+        action_name: "win.close-focused-tab",
+        default_accel: "<Ctrl>w",
+        label: "Close Focused Tab",
+        registers_gtk_accel: false,
+        command: ShortcutCommand::CloseFocusedTab,
+        scope: ShortcutScope::Window,
+        editable_capture_policy: EditableCapturePolicy::BypassInEditable,
+    },
+    ShortcutDefinition {
         id: ShortcutId::CloseFocusedPane,
         config_key: "close_focused_pane",
         action_name: "win.close-focused-pane",
-        default_accel: "<Ctrl>w",
+        default_accel: "<Ctrl><Alt>w",
         label: "Close Focused Pane",
         registers_gtk_accel: false,
         command: ShortcutCommand::CloseFocusedPane,
@@ -1594,7 +1607,7 @@ mod tests {
 
     #[test]
     fn definitions_cover_current_host_shortcuts() {
-        assert_eq!(definitions().len(), 47);
+        assert_eq!(definitions().len(), 48);
     }
 
     #[test]
