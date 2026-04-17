@@ -1112,6 +1112,8 @@ pub struct TerminalCallbacks {
 pub struct TerminalOptions {
     pub hover_focus: Rc<dyn Fn() -> bool>,
     pub saved_font_size: Option<f32>,
+    // When set, Ghostty spawns this shell command (via its `command` config)
+    // instead of the user's login shell. Used to auto-resume Claude sessions.
     pub startup_command: Option<String>,
     /// Extra environment variables to expose to the spawned shell
     /// (e.g. `LIMUX_WORKSPACE_ID`, `LIMUX_SURFACE_ID`, `LIMUX_PANE_ID`, `LIMUX_SOCKET`).
@@ -1121,6 +1123,14 @@ pub struct TerminalOptions {
     /// to call `limux identify` first. This is the foundation for the cmux
     /// agent-to-agent communication workflow.
     pub extra_env: Vec<(String, String)>,
+    // Opaque tab identifier exported into the shell's environment as
+    // `LIMUX_TAB_ID`. Currently informational; consumed by the wrapper
+    // script for debug logging if needed.
+    pub tab_id: Option<String>,
+    // Pre-generated Claude session UUID. Exported as
+    // `LIMUX_CLAUDE_SESSION_ID` so the bundled wrapper can pin any
+    // `claude` invocation in this tab to this session.
+    pub claude_session_id: Option<String>,
 }
 
 impl Default for TerminalOptions {
@@ -1130,6 +1140,8 @@ impl Default for TerminalOptions {
             saved_font_size: None,
             startup_command: None,
             extra_env: Vec::new(),
+            tab_id: None,
+            claude_session_id: None,
         }
     }
 }
@@ -1160,6 +1172,8 @@ pub fn create_terminal(
     let wd = working_directory.map(|s| s.to_string());
     let saved_font_size = options.saved_font_size;
     let startup_command = options.startup_command;
+    let tab_id = options.tab_id;
+    let claude_session_id = options.claude_session_id;
     let hover_focus = options.hover_focus;
     let extra_env = options.extra_env;
     let callbacks = Rc::new(RefCell::new(callbacks));
@@ -1345,38 +1359,73 @@ pub fn create_terminal(
                 config.working_directory = cwd.as_ptr();
             }
 
-            // Build env_vars array for the spawned shell. Keep the CStrings
-            // and the ghostty_env_var_s array alive until after
-            // ghostty_surface_new returns — Ghostty dupes the strings into
-            // its own arena (see ghostty/src/apprt/embedded.zig:573), so we
-            // only need the pointers valid across that single call.
-            let mut env_cstrings: Vec<(CString, CString)> = Vec::with_capacity(extra_env.len());
-            for (k, v) in extra_env.iter() {
-                if let (Ok(k_c), Ok(v_c)) = (CString::new(k.as_str()), CString::new(v.as_str())) {
-                    env_cstrings.push((k_c, v_c));
-                }
-            }
-            let mut env_vars_raw: Vec<ghostty_env_var_s> = env_cstrings
-                .iter()
-                .map(|(k, v)| ghostty_env_var_s {
-                    key: k.as_ptr(),
-                    value: v.as_ptr(),
-                })
-                .collect();
-            if !env_vars_raw.is_empty() {
-                config.env_vars = env_vars_raw.as_mut_ptr();
-                config.env_var_count = env_vars_raw.len();
-            }
-
-            let c_startup_command = startup_command
+            // Ghostty treats `command` as a full shell line executed by the
+            // user's shell, so we pass the already-built string verbatim.
+            let c_command = startup_command
                 .as_ref()
-                .and_then(|command| CString::new(command.as_str()).ok());
-            if let Some(ref command) = c_startup_command {
-                config.command = command.as_ptr();
+                .and_then(|cmd| CString::new(cmd.as_str()).ok());
+            if let Some(ref cmd) = c_command {
+                config.command = cmd.as_ptr();
                 eprintln!(
                     "limux: starting restored terminal command={}",
-                    command.to_string_lossy()
+                    cmd.to_string_lossy()
                 );
+            }
+
+            // Build the per-tab environment overrides. Ghostty copies the
+            // keys/values into its own arena during `ghostty_surface_new`,
+            // so these CStrings and the `env_vars` vector only need to
+            // outlive that single FFI call.
+            let mut env_cstrings: Vec<CString> = Vec::new();
+            let mut env_vars: Vec<ghostty_env_var_s> = Vec::new();
+            let mut push_env = |key: &str, value: String| {
+                let Ok(c_key) = CString::new(key) else {
+                    return;
+                };
+                let Ok(c_value) = CString::new(value) else {
+                    return;
+                };
+                env_cstrings.push(c_key);
+                env_cstrings.push(c_value);
+                let key_ptr = env_cstrings[env_cstrings.len() - 2].as_ptr();
+                let value_ptr = env_cstrings[env_cstrings.len() - 1].as_ptr();
+                env_vars.push(ghostty_env_var_s {
+                    key: key_ptr,
+                    value: value_ptr,
+                });
+            };
+
+            // Identity vars (LIMUX_WORKSPACE_ID / SURFACE_ID / PANE_ID /
+            // TAB_ID / SOCKET) so in-terminal CLI calls auto-target this
+            // surface without flags.
+            for (k, v) in extra_env.iter() {
+                push_env(k, v.clone());
+            }
+            if let Some(ref value) = tab_id {
+                push_env("LIMUX_TAB_ID", value.clone());
+            }
+            if let Some(ref value) = claude_session_id {
+                push_env("LIMUX_CLAUDE_SESSION_ID", value.clone());
+            }
+            // Prepend the wrapper directory to PATH so the shim claude
+            // binary is picked up before the real one. The wrapper strips
+            // itself back out before resolving the real binary.
+            if let Some(wrapper_dir) = crate::claude_session::wrapper_path_component() {
+                let existing_path = std::env::var_os("PATH").unwrap_or_default();
+                let mut prepended = std::ffi::OsString::new();
+                prepended.push(wrapper_dir.as_os_str());
+                if !existing_path.is_empty() {
+                    prepended.push(":");
+                    prepended.push(&existing_path);
+                }
+                if let Some(prepended_str) = prepended.to_str() {
+                    push_env("PATH", prepended_str.to_string());
+                }
+            }
+
+            if !env_vars.is_empty() {
+                config.env_vars = env_vars.as_mut_ptr();
+                config.env_var_count = env_vars.len();
             }
 
             let surface = unsafe { ghostty_surface_new(app, &config) };

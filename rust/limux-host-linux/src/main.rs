@@ -1,4 +1,5 @@
 mod app_config;
+mod claude_session;
 mod control_bridge;
 mod ghostty_config;
 mod keybind_editor;
@@ -165,6 +166,13 @@ fn main() {
     // fall back to common system Ghostty install locations.
     set_ghostty_runtime_env();
     sanitize_terminal_child_env();
+
+    // Install the `claude` wrapper script that intercepts invocations inside
+    // limux-spawned shells and pins them to a stable per-tab session UUID.
+    // Non-fatal on failure: Claude auto-resume simply won't activate.
+    if let Err(err) = claude_session::ensure_wrapper_script() {
+        eprintln!("limux: failed to install claude wrapper: {err}");
+    }
 
     // WebKitGTK's bubblewrap sandbox requires unprivileged user namespaces,
     // which may not be available. Disable it to prevent crashes on launch.
