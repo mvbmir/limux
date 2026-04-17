@@ -5597,9 +5597,7 @@ fn browser_navigate(
     }))
 }
 
-fn browser_get_url(
-    surface: &str,
-) -> Result<serde_json::Value, crate::control_bridge::BridgeError> {
+fn browser_get_url(surface: &str) -> Result<serde_json::Value, crate::control_bridge::BridgeError> {
     let target = pane::find_browser_target(surface).ok_or_else(|| {
         crate::control_bridge::BridgeError::not_found("browser surface not found")
     })?;
@@ -5639,9 +5637,7 @@ fn browser_history(
 fn browser_screenshot(
     surface: &str,
     out_path: Option<String>,
-    reply: std::sync::mpsc::Sender<
-        Result<serde_json::Value, crate::control_bridge::BridgeError>,
-    >,
+    reply: std::sync::mpsc::Sender<Result<serde_json::Value, crate::control_bridge::BridgeError>>,
 ) {
     let Some(target) = pane::find_browser_target(surface) else {
         let _ = reply.send(Err(crate::control_bridge::BridgeError::not_found(
@@ -5677,9 +5673,7 @@ fn browser_eval(
     surface: &str,
     script: String,
     wrap_key: Option<String>,
-    reply: std::sync::mpsc::Sender<
-        Result<serde_json::Value, crate::control_bridge::BridgeError>,
-    >,
+    reply: std::sync::mpsc::Sender<Result<serde_json::Value, crate::control_bridge::BridgeError>>,
 ) {
     let Some(target) = pane::find_browser_target(surface) else {
         let _ = reply.send(Err(crate::control_bridge::BridgeError::not_found(
