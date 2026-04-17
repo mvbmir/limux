@@ -614,6 +614,55 @@ pub fn cycle_tab_in_pane(pane_widget: &gtk::Widget, delta: i32) {
     (internals.callbacks.on_state_changed)();
 }
 
+/// Close a specific tab by id within a pane. Returns false if the pane or tab
+/// doesn't exist. Triggers the same empty-pane handling as closing the active
+/// tab (may close the pane if it was the last tab).
+pub fn close_tab_in_pane_by_id(pane_widget: &gtk::Widget, tab_id: &str) -> bool {
+    let Some(outer) = pane_widget.downcast_ref::<gtk::Box>() else {
+        return false;
+    };
+    let internals: Rc<PaneInternals> = unsafe {
+        match outer.data::<Rc<PaneInternals>>("limux-pane-internals") {
+            Some(ptr) => ptr.as_ref().clone(),
+            None => return false,
+        }
+    };
+    let exists = internals.tab_state.borrow().tabs.iter().any(|e| e.id == tab_id);
+    if !exists {
+        return false;
+    }
+    remove_tab(
+        &internals.tab_strip,
+        &internals.content_stack,
+        &internals.tab_state,
+        tab_id,
+        &internals.callbacks,
+        outer,
+        PaneEmptyReason::ClosedLastTab,
+    );
+    true
+}
+
+/// Activate a specific tab by id within a pane. Returns false if the tab
+/// doesn't exist.
+pub fn activate_tab_in_pane_by_id(pane_widget: &gtk::Widget, tab_id: &str) -> bool {
+    let Some(internals) = find_pane_internals(pane_widget) else {
+        return false;
+    };
+    let exists = internals.tab_state.borrow().tabs.iter().any(|e| e.id == tab_id);
+    if !exists {
+        return false;
+    }
+    activate_tab(
+        &internals.tab_strip,
+        &internals.content_stack,
+        &internals.tab_state,
+        tab_id,
+    );
+    true
+}
+
+
 pub fn focus_active_tab_in_pane(pane_widget: &gtk::Widget) -> bool {
     let Some(internals) = find_pane_internals(pane_widget) else {
         return false;
@@ -2712,6 +2761,56 @@ impl BrowserShortcutTarget {
         {
             let _ = out_path;
             callback(Err("webkit feature disabled".to_string()));
+        }
+    }
+
+    /// Register a user script that webkit injects on every top-frame load.
+    /// Useful for `browser.addinitscript` — the script persists across
+    /// navigations for the lifetime of the WebView.
+    pub fn add_user_script(&self, source: &str) -> bool {
+        #[cfg(feature = "webkit")]
+        {
+            use webkit6::prelude::*;
+            if let Some(ucm) = self.handles.webview.user_content_manager() {
+                ucm.add_script(&webkit6::UserScript::new(
+                    source,
+                    webkit6::UserContentInjectedFrames::TopFrame,
+                    webkit6::UserScriptInjectionTime::Start,
+                    &[],
+                    &[],
+                ));
+                return true;
+            }
+            false
+        }
+        #[cfg(not(feature = "webkit"))]
+        {
+            let _ = source;
+            false
+        }
+    }
+
+    /// Register a user stylesheet that webkit injects on every top-frame load.
+    pub fn add_user_style(&self, css: &str) -> bool {
+        #[cfg(feature = "webkit")]
+        {
+            use webkit6::prelude::*;
+            if let Some(ucm) = self.handles.webview.user_content_manager() {
+                ucm.add_style_sheet(&webkit6::UserStyleSheet::new(
+                    css,
+                    webkit6::UserContentInjectedFrames::TopFrame,
+                    webkit6::UserStyleLevel::User,
+                    &[],
+                    &[],
+                ));
+                return true;
+            }
+            false
+        }
+        #[cfg(not(feature = "webkit"))]
+        {
+            let _ = css;
+            false
         }
     }
 }

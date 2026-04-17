@@ -81,6 +81,14 @@ const METHODS: &[&str] = &[
     "browser.storage.session.clear",
     "browser.state.save",
     "browser.state.load",
+    "browser.tab.list",
+    "browser.tab.new",
+    "browser.tab.switch",
+    "browser.tab.close",
+    "browser.addscript",
+    "browser.addinitscript",
+    "browser.addstyle",
+    "browser.highlight",
 ];
 
 const PARSE_ERROR_CODE: i64 = -32700;
@@ -191,6 +199,35 @@ pub enum ControlCommand {
         wrap_key: Option<String>,
         reply: mpsc::Sender<BridgeResult>,
     },
+    BrowserTabList {
+        target: WorkspaceTarget,
+        pane: Option<String>,
+        reply: mpsc::Sender<BridgeResult>,
+    },
+    BrowserTabNew {
+        target: WorkspaceTarget,
+        pane: Option<String>,
+        url: Option<String>,
+        reply: mpsc::Sender<BridgeResult>,
+    },
+    BrowserTabSwitch {
+        surface: String,
+        reply: mpsc::Sender<BridgeResult>,
+    },
+    BrowserTabClose {
+        surface: String,
+        reply: mpsc::Sender<BridgeResult>,
+    },
+    BrowserAddInitScript {
+        surface: String,
+        script: String,
+        reply: mpsc::Sender<BridgeResult>,
+    },
+    BrowserAddStyle {
+        surface: String,
+        css: String,
+        reply: mpsc::Sender<BridgeResult>,
+    },
 }
 
 impl ControlCommand {
@@ -214,7 +251,13 @@ impl ControlCommand {
             | Self::BrowserForward { reply, .. }
             | Self::BrowserReload { reply, .. }
             | Self::BrowserScreenshot { reply, .. }
-            | Self::BrowserEval { reply, .. } => {
+            | Self::BrowserEval { reply, .. }
+            | Self::BrowserTabList { reply, .. }
+            | Self::BrowserTabNew { reply, .. }
+            | Self::BrowserTabSwitch { reply, .. }
+            | Self::BrowserTabClose { reply, .. }
+            | Self::BrowserAddInitScript { reply, .. }
+            | Self::BrowserAddStyle { reply, .. } => {
                 let _ = reply.send(result);
             }
         }
@@ -599,6 +642,73 @@ fn handle_method(
                 rx,
             )
         }
+        "browser.tab.list" => {
+            let target = match parse_optional_workspace_target(params, false) {
+                Ok(t) => t,
+                Err(error) => return error_response(id, error),
+            };
+            let pane = optional_string(params, &["pane_id", "pane_ref", "pane"])
+                .map(|p| p.strip_prefix("pane:").unwrap_or(&p).to_string());
+            let (reply, rx) = mpsc::channel();
+            (ControlCommand::BrowserTabList { target, pane, reply }, rx)
+        }
+        "browser.tab.new" => {
+            let target = match parse_optional_workspace_target(params, false) {
+                Ok(t) => t,
+                Err(error) => return error_response(id, error),
+            };
+            let pane = optional_string(params, &["pane_id", "pane_ref", "pane"])
+                .map(|p| p.strip_prefix("pane:").unwrap_or(&p).to_string());
+            let url = optional_string(params, &["url"]);
+            let (reply, rx) = mpsc::channel();
+            (ControlCommand::BrowserTabNew { target, pane, url, reply }, rx)
+        }
+        "browser.tab.switch" => {
+            let surface = match required_string(params, &["surface_id", "id"], "surface_id") {
+                Ok(value) => normalize_handle(value, "surface:"),
+                Err(error) => return error_response(id, error),
+            };
+            let (reply, rx) = mpsc::channel();
+            (ControlCommand::BrowserTabSwitch { surface, reply }, rx)
+        }
+        "browser.tab.close" => {
+            let surface = match required_string(params, &["surface_id", "id"], "surface_id") {
+                Ok(value) => normalize_handle(value, "surface:"),
+                Err(error) => return error_response(id, error),
+            };
+            let (reply, rx) = mpsc::channel();
+            (ControlCommand::BrowserTabClose { surface, reply }, rx)
+        }
+        "browser.addinitscript" => {
+            let surface = match required_string(params, &["surface_id", "id"], "surface_id") {
+                Ok(value) => normalize_handle(value, "surface:"),
+                Err(error) => return error_response(id, error),
+            };
+            let script = match required_string(params, &["script"], "script") {
+                Ok(value) => value,
+                Err(error) => return error_response(id, error),
+            };
+            let (reply, rx) = mpsc::channel();
+            (
+                ControlCommand::BrowserAddInitScript { surface, script, reply },
+                rx,
+            )
+        }
+        "browser.addstyle" => {
+            let surface = match required_string(params, &["surface_id", "id"], "surface_id") {
+                Ok(value) => normalize_handle(value, "surface:"),
+                Err(error) => return error_response(id, error),
+            };
+            let css = match required_string(params, &["css", "style"], "css") {
+                Ok(value) => value,
+                Err(error) => return error_response(id, error),
+            };
+            let (reply, rx) = mpsc::channel();
+            (
+                ControlCommand::BrowserAddStyle { surface, css, reply },
+                rx,
+            )
+        }
         m if m.starts_with("browser.") => {
             let surface = match required_string(params, &["surface_id", "id"], "surface_id") {
                 Ok(value) => normalize_handle(value, "surface:"),
@@ -786,6 +896,11 @@ fn build_browser_script(
         "browser.storage.session.clear" => Ok((browser_storage_clear("sessionStorage"), None)),
         "browser.state.save" => Ok((browser_state_save(params)?, None)),
         "browser.state.load" => Ok((browser_state_load(params)?, None)),
+        "browser.addscript" => {
+            let script = required_string(params, &["script"], "script")?;
+            Ok((format!("(() => {{ {script}\nreturn JSON.stringify({{ ok: true }}); }})()", script = script), None))
+        }
+        "browser.highlight" => Ok((browser_highlight(params)?, None)),
         _ => Err(BridgeError::invalid_params(format!(
             "no browser script for {method}"
         ))),
@@ -895,6 +1010,35 @@ fn browser_storage_clear(kind: &str) -> String {
 /// For now this returns the bundle inline; writing to disk is the caller's
 /// responsibility until we add a `ControlCommand::BrowserStateSave` variant
 /// that can touch the filesystem.
+/// Pulse an outline ring on the target element. Useful for visual debugging:
+/// `limux-cli browser --surface ... highlight --ref @e3 --duration 800`.
+fn browser_highlight(params: &Map<String, Value>) -> Result<String, BridgeError> {
+    let handle = target_handle(params)?;
+    let duration = params
+        .get("duration")
+        .or_else(|| params.get("duration_ms"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(600);
+    let body = format!(
+        r#"
+        const prev_outline = el.style.outline;
+        const prev_outline_offset = el.style.outlineOffset;
+        const prev_transition = el.style.transition;
+        el.style.transition = "outline-color 200ms";
+        el.style.outline = "3px solid #ff00aa";
+        el.style.outlineOffset = "2px";
+        setTimeout(() => {{
+            el.style.outline = prev_outline;
+            el.style.outlineOffset = prev_outline_offset;
+            el.style.transition = prev_transition;
+        }}, {duration});
+        return JSON.stringify({{ ok: true, ref: target.ref, selector: target.selector, duration_ms: {duration} }});
+    "#,
+        duration = duration
+    );
+    Ok(wrap_action_js(&js_literal(&handle), &body))
+}
+
 fn browser_state_save(_params: &Map<String, Value>) -> Result<String, BridgeError> {
     Ok(r#"(() => {
         const dumpStore = (store) => {
