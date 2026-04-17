@@ -3139,16 +3139,47 @@ impl BrowserShortcutTarget {
     ) {
         #[cfg(feature = "webkit")]
         {
+            // Use call_async_javascript_function so Promise-returning scripts
+            // are awaited by webkit instead of surfacing as
+            // "Unsupported result type". The body is wrapped as an async
+            // function internally, so we prepend `return ` to turn the
+            // expression-style scripts (e.g. `(() => ...)()`) into a valid
+            // body that returns the expression's value.
+            // Strip trailing semicolons before wrapping as `return (...);`
+            // otherwise a script like `(() => ...)();` becomes `return (...;);`
+            // which is a syntax error.
+            let trimmed = script.trim().trim_end_matches(';').trim_end();
+            let body = format!("return ({trimmed});");
             let mut cb = Some(callback);
-            self.handles.webview.evaluate_javascript(
-                &script,
+            self.handles.webview.call_async_javascript_function(
+                &body,
+                None,
                 None,
                 None,
                 None::<&gtk::gio::Cancellable>,
                 move |result| {
                     if let Some(cb) = cb.take() {
                         match result {
-                            Ok(value) => cb(Ok(value.to_str().to_string())),
+                            Ok(value) => {
+                                // jsc::Value::to_json serializes any type
+                                // (string, object, null, bool) to a JSON
+                                // string — safer than to_str which rejects
+                                // non-string types. Our JS always returns a
+                                // JSON-encoded string so value.to_str is
+                                // usually fine; fall back to to_json for
+                                // safety.
+                                let raw = value.to_str();
+                                let raw = raw.as_str();
+                                if !raw.is_empty() && raw != "[object Promise]" {
+                                    cb(Ok(raw.to_string()));
+                                } else {
+                                    let json = value
+                                        .to_json(0)
+                                        .map(|g| g.to_string())
+                                        .unwrap_or_default();
+                                    cb(Ok(json));
+                                }
+                            }
                             Err(error) => cb(Err(error.to_string())),
                         }
                     }
