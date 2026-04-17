@@ -3169,6 +3169,47 @@ fn handle_control_command(state: &State, command: ControlCommand) {
         } => {
             browser_eval(&surface, script, wrap_key, reply);
         }
+        ControlCommand::BrowserTabList {
+            target,
+            pane,
+            reply,
+        } => {
+            let result = list_surfaces_for_target(state, &target, pane.as_deref());
+            let _ = reply.send(result);
+        }
+        ControlCommand::BrowserTabNew {
+            target,
+            pane,
+            url,
+            reply,
+        } => {
+            let result = browser_tab_new(state, &target, pane.as_deref(), url);
+            let _ = reply.send(result);
+        }
+        ControlCommand::BrowserTabSwitch { surface, reply } => {
+            let result = browser_tab_switch(&surface);
+            let _ = reply.send(result);
+        }
+        ControlCommand::BrowserTabClose { surface, reply } => {
+            let result = browser_tab_close(&surface);
+            let _ = reply.send(result);
+        }
+        ControlCommand::BrowserAddInitScript {
+            surface,
+            script,
+            reply,
+        } => {
+            let result = browser_add_init_script(&surface, &script);
+            let _ = reply.send(result);
+        }
+        ControlCommand::BrowserAddStyle {
+            surface,
+            css,
+            reply,
+        } => {
+            let result = browser_add_style(&surface, &css);
+            let _ = reply.send(result);
+        }
     }
 }
 
@@ -3499,6 +3540,205 @@ fn browser_eval(
             }
         }),
     );
+}
+
+/// Find a pane widget by id within the active workspace. Falls back to the
+/// first pane when pane_id is None.
+fn find_pane_widget_in_workspace(
+    state: &State,
+    target: &WorkspaceTarget,
+    pane_id: Option<u32>,
+) -> Option<(String, gtk::Widget)> {
+    let app_state = state.borrow();
+    let idx = workspace_index_for_target(&app_state, target)?;
+    let workspace = &app_state.workspaces[idx];
+    let ws_id = workspace.id.clone();
+    let mut found: Option<gtk::Widget> = None;
+    pane::walk_panes(&workspace.root, |pane_widget| {
+        if found.is_some() {
+            return;
+        }
+        match pane_id {
+            Some(wanted) => {
+                if let Some(info) = pane::pane_snapshot_info(pane_widget) {
+                    if info.pane_id == wanted {
+                        found = Some(pane_widget.clone());
+                    }
+                }
+            }
+            None => found = Some(pane_widget.clone()),
+        }
+    });
+    found.map(|w| (ws_id, w))
+}
+
+fn browser_tab_new(
+    state: &State,
+    target: &WorkspaceTarget,
+    pane: Option<&str>,
+    url: Option<String>,
+) -> Result<serde_json::Value, crate::control_bridge::BridgeError> {
+    let explicit_pane_id: Option<u32> = pane.and_then(|p| p.parse::<u32>().ok());
+
+    // Workspace id + walker context.
+    let workspace_id = {
+        let app_state = state.borrow();
+        let idx = workspace_index_for_target(&app_state, target)
+            .ok_or_else(|| crate::control_bridge::BridgeError::not_found("workspace not found"))?;
+        app_state.workspaces[idx].id.clone()
+    };
+
+    // Pick target pane:
+    //  1. Explicit pane_id param wins.
+    //  2. Prefer an existing non-caller pane that already contains a browser
+    //     surface — tabs naturally stack with other browsers.
+    //  3. Else any non-caller pane.
+    //  4. Else split the caller's pane so the terminal stays visible.
+    let caller_pane = find_focused_pane(state).map(|(_, w)| w);
+
+    let mut chosen: Option<gtk::Widget>;
+    let mut created_split = false;
+
+    if explicit_pane_id.is_some() {
+        chosen = find_pane_widget_in_workspace(state, target, explicit_pane_id).map(|(_, w)| w);
+    } else {
+        let mut candidates_with_browser: Vec<gtk::Widget> = Vec::new();
+        let mut candidates_other: Vec<gtk::Widget> = Vec::new();
+        {
+            let app_state = state.borrow();
+            if let Some(ws) = app_state.workspaces.iter().find(|w| w.id == workspace_id) {
+                pane::walk_panes(&ws.root, |pane_widget| {
+                    if caller_pane
+                        .as_ref()
+                        .map(|c| c == pane_widget)
+                        .unwrap_or(false)
+                    {
+                        return;
+                    }
+                    let has_browser = pane::pane_snapshot_info(pane_widget)
+                        .map(|info| {
+                            info.surfaces
+                                .iter()
+                                .any(|s| matches!(s.kind, pane::SurfaceSnapshotKind::Browser))
+                        })
+                        .unwrap_or(false);
+                    if has_browser {
+                        candidates_with_browser.push(pane_widget.clone());
+                    } else {
+                        candidates_other.push(pane_widget.clone());
+                    }
+                });
+            }
+        }
+        chosen = candidates_with_browser
+            .into_iter()
+            .next()
+            .or_else(|| candidates_other.into_iter().next());
+
+        // No non-caller pane → split caller's pane.
+        if chosen.is_none() {
+            let caller = caller_pane.clone().ok_or_else(|| {
+                crate::control_bridge::BridgeError::not_found("no pane to host tab")
+            })?;
+            let new_pane = split_pane(
+                state,
+                &workspace_id,
+                &caller,
+                gtk::Orientation::Horizontal,
+                SplitPaneOptions {
+                    initial_state: None,
+                    skip_default_tab: true,
+                    new_pane_first: false,
+                    persist: true,
+                },
+            );
+            chosen = Some(new_pane);
+            created_split = true;
+        }
+    }
+
+    let pane_widget =
+        chosen.ok_or_else(|| crate::control_bridge::BridgeError::not_found("pane not found"))?;
+
+    let resolved_url = url.unwrap_or_else(|| "about:blank".to_string());
+    let new_surface_id = pane::add_browser_tab_returning_id(&pane_widget, Some(&resolved_url))
+        .ok_or_else(|| {
+            crate::control_bridge::BridgeError::internal("browser tab creation failed")
+        })?;
+    let snapshot = pane::pane_snapshot_info(&pane_widget)
+        .ok_or_else(|| crate::control_bridge::BridgeError::internal("pane snapshot failed"))?;
+    let surface = snapshot
+        .surfaces
+        .iter()
+        .find(|s| s.id == new_surface_id)
+        .ok_or_else(|| {
+            crate::control_bridge::BridgeError::internal("new surface missing from snapshot")
+        })?;
+    Ok(serde_json::json!({
+        "surface_id": new_surface_id.as_str(),
+        "surface_ref": surface_ref(&new_surface_id),
+        "pane_id": snapshot.pane_id.to_string(),
+        "pane_ref": pane_ref(snapshot.pane_id),
+        "created_split": created_split,
+        "surface": encode_surface_row(&workspace_id, &snapshot, surface),
+        "url": resolved_url,
+    }))
+}
+
+fn browser_tab_switch(
+    surface: &str,
+) -> Result<serde_json::Value, crate::control_bridge::BridgeError> {
+    let pane_widget = pane::find_pane_widget_for_surface(surface)
+        .ok_or_else(|| crate::control_bridge::BridgeError::not_found("surface not found"))?;
+    let ok = pane::activate_tab_in_pane_by_id(&pane_widget, surface);
+    Ok(serde_json::json!({
+        "surface_id": surface,
+        "surface_ref": surface_ref(surface),
+        "ok": ok,
+    }))
+}
+
+fn browser_tab_close(
+    surface: &str,
+) -> Result<serde_json::Value, crate::control_bridge::BridgeError> {
+    let pane_widget = pane::find_pane_widget_for_surface(surface)
+        .ok_or_else(|| crate::control_bridge::BridgeError::not_found("surface not found"))?;
+    let ok = pane::close_tab_in_pane_by_id(&pane_widget, surface);
+    Ok(serde_json::json!({
+        "surface_id": surface,
+        "surface_ref": surface_ref(surface),
+        "ok": ok,
+    }))
+}
+
+fn browser_add_init_script(
+    surface: &str,
+    script: &str,
+) -> Result<serde_json::Value, crate::control_bridge::BridgeError> {
+    let target = pane::find_browser_target(surface).ok_or_else(|| {
+        crate::control_bridge::BridgeError::not_found("browser surface not found")
+    })?;
+    let ok = target.add_user_script(script);
+    Ok(serde_json::json!({
+        "surface_id": surface,
+        "surface_ref": surface_ref(surface),
+        "ok": ok,
+    }))
+}
+
+fn browser_add_style(
+    surface: &str,
+    css: &str,
+) -> Result<serde_json::Value, crate::control_bridge::BridgeError> {
+    let target = pane::find_browser_target(surface).ok_or_else(|| {
+        crate::control_bridge::BridgeError::not_found("browser surface not found")
+    })?;
+    let ok = target.add_user_style(css);
+    Ok(serde_json::json!({
+        "surface_id": surface,
+        "surface_ref": surface_ref(surface),
+        "ok": ok,
+    }))
 }
 
 fn add_workspace_from_state(state: &State, workspace: &WorkspaceState) {

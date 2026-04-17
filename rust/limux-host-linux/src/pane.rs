@@ -614,6 +614,64 @@ pub fn cycle_tab_in_pane(pane_widget: &gtk::Widget, delta: i32) {
     (internals.callbacks.on_state_changed)();
 }
 
+/// Close a specific tab by id within a pane. Returns false if the pane or tab
+/// doesn't exist. Triggers the same empty-pane handling as closing the active
+/// tab (may close the pane if it was the last tab).
+pub fn close_tab_in_pane_by_id(pane_widget: &gtk::Widget, tab_id: &str) -> bool {
+    let Some(outer) = pane_widget.downcast_ref::<gtk::Box>() else {
+        return false;
+    };
+    let internals: Rc<PaneInternals> = unsafe {
+        match outer.data::<Rc<PaneInternals>>("limux-pane-internals") {
+            Some(ptr) => ptr.as_ref().clone(),
+            None => return false,
+        }
+    };
+    let exists = internals
+        .tab_state
+        .borrow()
+        .tabs
+        .iter()
+        .any(|e| e.id == tab_id);
+    if !exists {
+        return false;
+    }
+    remove_tab(
+        &internals.tab_strip,
+        &internals.content_stack,
+        &internals.tab_state,
+        tab_id,
+        &internals.callbacks,
+        outer,
+        PaneEmptyReason::ClosedLastTab,
+    );
+    true
+}
+
+/// Activate a specific tab by id within a pane. Returns false if the tab
+/// doesn't exist.
+pub fn activate_tab_in_pane_by_id(pane_widget: &gtk::Widget, tab_id: &str) -> bool {
+    let Some(internals) = find_pane_internals(pane_widget) else {
+        return false;
+    };
+    let exists = internals
+        .tab_state
+        .borrow()
+        .tabs
+        .iter()
+        .any(|e| e.id == tab_id);
+    if !exists {
+        return false;
+    }
+    activate_tab(
+        &internals.tab_strip,
+        &internals.content_stack,
+        &internals.tab_state,
+        tab_id,
+    );
+    true
+}
+
 pub fn focus_active_tab_in_pane(pane_widget: &gtk::Widget) -> bool {
     let Some(internals) = find_pane_internals(pane_widget) else {
         return false;
@@ -2651,16 +2709,45 @@ impl BrowserShortcutTarget {
     ) {
         #[cfg(feature = "webkit")]
         {
+            // Use call_async_javascript_function so Promise-returning scripts
+            // are awaited by webkit instead of surfacing as
+            // "Unsupported result type". The body is wrapped as an async
+            // function internally, so we prepend `return ` to turn the
+            // expression-style scripts (e.g. `(() => ...)()`) into a valid
+            // body that returns the expression's value.
+            // Strip trailing semicolons before wrapping as `return (...);`
+            // otherwise a script like `(() => ...)();` becomes `return (...;);`
+            // which is a syntax error.
+            let trimmed = script.trim().trim_end_matches(';').trim_end();
+            let body = format!("return ({trimmed});");
             let mut cb = Some(callback);
-            self.handles.webview.evaluate_javascript(
-                &script,
+            self.handles.webview.call_async_javascript_function(
+                &body,
+                None,
                 None,
                 None,
                 None::<&gtk::gio::Cancellable>,
                 move |result| {
                     if let Some(cb) = cb.take() {
                         match result {
-                            Ok(value) => cb(Ok(value.to_str().to_string())),
+                            Ok(value) => {
+                                // jsc::Value::to_json serializes any type
+                                // (string, object, null, bool) to a JSON
+                                // string — safer than to_str which rejects
+                                // non-string types. Our JS always returns a
+                                // JSON-encoded string so value.to_str is
+                                // usually fine; fall back to to_json for
+                                // safety.
+                                let raw = value.to_str();
+                                let raw = raw.as_str();
+                                if !raw.is_empty() && raw != "[object Promise]" {
+                                    cb(Ok(raw.to_string()));
+                                } else {
+                                    let json =
+                                        value.to_json(0).map(|g| g.to_string()).unwrap_or_default();
+                                    cb(Ok(json));
+                                }
+                            }
                             Err(error) => cb(Err(error.to_string())),
                         }
                     }
@@ -2712,6 +2799,56 @@ impl BrowserShortcutTarget {
         {
             let _ = out_path;
             callback(Err("webkit feature disabled".to_string()));
+        }
+    }
+
+    /// Register a user script that webkit injects on every top-frame load.
+    /// Useful for `browser.addinitscript` — the script persists across
+    /// navigations for the lifetime of the WebView.
+    pub fn add_user_script(&self, source: &str) -> bool {
+        #[cfg(feature = "webkit")]
+        {
+            use webkit6::prelude::*;
+            if let Some(ucm) = self.handles.webview.user_content_manager() {
+                ucm.add_script(&webkit6::UserScript::new(
+                    source,
+                    webkit6::UserContentInjectedFrames::TopFrame,
+                    webkit6::UserScriptInjectionTime::Start,
+                    &[],
+                    &[],
+                ));
+                return true;
+            }
+            false
+        }
+        #[cfg(not(feature = "webkit"))]
+        {
+            let _ = source;
+            false
+        }
+    }
+
+    /// Register a user stylesheet that webkit injects on every top-frame load.
+    pub fn add_user_style(&self, css: &str) -> bool {
+        #[cfg(feature = "webkit")]
+        {
+            use webkit6::prelude::*;
+            if let Some(ucm) = self.handles.webview.user_content_manager() {
+                ucm.add_style_sheet(&webkit6::UserStyleSheet::new(
+                    css,
+                    webkit6::UserContentInjectedFrames::TopFrame,
+                    webkit6::UserStyleLevel::User,
+                    &[],
+                    &[],
+                ));
+                return true;
+            }
+            false
+        }
+        #[cfg(not(feature = "webkit"))]
+        {
+            let _ = css;
+            false
         }
     }
 }
@@ -2976,6 +3113,18 @@ const LIMUX_BROWSER_EDITABLE_STATE_SCRIPT: &str = r#"
 "#;
 
 #[cfg(feature = "webkit")]
+fn cookie_storage_path() -> std::path::PathBuf {
+    dirs::data_dir()
+        .unwrap_or_else(|| {
+            dirs::home_dir()
+                .unwrap_or_else(|| std::path::PathBuf::from("."))
+                .join(".local/share")
+        })
+        .join("limux")
+        .join("cookies.sqlite")
+}
+
+#[cfg(feature = "webkit")]
 fn create_browser_widget(
     initial_uri: Option<&str>,
     saved_uri: Rc<RefCell<Option<String>>>,
@@ -2985,6 +3134,20 @@ fn create_browser_widget(
 
     // Use a NetworkSession to avoid sandbox issues
     let network_session = webkit6::NetworkSession::default();
+    // Enable persistent cookie storage so logins survive limux relaunches.
+    // Idempotent across webviews — the same NetworkSession singleton backs
+    // every browser tab, so calling set_persistent_storage here affects the
+    // whole app.
+    if let Some(cookie_manager) = network_session.as_ref().and_then(|ns| ns.cookie_manager()) {
+        let cookies_path = cookie_storage_path();
+        if let Some(parent) = cookies_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        cookie_manager.set_persistent_storage(
+            &cookies_path.to_string_lossy(),
+            webkit6::CookiePersistentStorage::Sqlite,
+        );
+    }
     let web_context = webkit6::WebContext::default();
     let user_content_manager = webkit6::UserContentManager::new();
     let dom_editable = Rc::new(Cell::new(false));
