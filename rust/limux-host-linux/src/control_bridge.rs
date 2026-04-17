@@ -26,6 +26,18 @@ const METHODS: &[&str] = &[
     "workspace.rename",
     "workspace.close",
     "surface.send_text",
+    "pane.list",
+    "pane.surfaces",
+    "surface.list",
+    "surface.current",
+    "browser.open_split",
+    "browser.navigate",
+    "browser.url.get",
+    "browser.back",
+    "browser.forward",
+    "browser.reload",
+    "browser.screenshot",
+    "browser.eval",
 ];
 
 const PARSE_ERROR_CODE: i64 = -32700;
@@ -82,6 +94,60 @@ pub enum ControlCommand {
         text: String,
         reply: mpsc::Sender<BridgeResult>,
     },
+    ListPanes {
+        target: WorkspaceTarget,
+        reply: mpsc::Sender<BridgeResult>,
+    },
+    ListSurfaces {
+        target: WorkspaceTarget,
+        pane_filter: Option<String>,
+        reply: mpsc::Sender<BridgeResult>,
+    },
+    CurrentSurface {
+        target: WorkspaceTarget,
+        reply: mpsc::Sender<BridgeResult>,
+    },
+    BrowserOpenSplit {
+        target: WorkspaceTarget,
+        source_surface: Option<String>,
+        url: Option<String>,
+        reply: mpsc::Sender<BridgeResult>,
+    },
+    BrowserNavigate {
+        surface: String,
+        url: String,
+        reply: mpsc::Sender<BridgeResult>,
+    },
+    BrowserGetUrl {
+        surface: String,
+        reply: mpsc::Sender<BridgeResult>,
+    },
+    BrowserBack {
+        surface: String,
+        reply: mpsc::Sender<BridgeResult>,
+    },
+    BrowserForward {
+        surface: String,
+        reply: mpsc::Sender<BridgeResult>,
+    },
+    BrowserReload {
+        surface: String,
+        reply: mpsc::Sender<BridgeResult>,
+    },
+    BrowserScreenshot {
+        surface: String,
+        out_path: Option<String>,
+        reply: mpsc::Sender<BridgeResult>,
+    },
+    BrowserEval {
+        surface: String,
+        script: String,
+        /// If Some, the handler parses the JS reply as JSON and wraps it under
+        /// this key in the response. If None, the reply is returned verbatim
+        /// as a string under the "result" key.
+        wrap_key: Option<String>,
+        reply: mpsc::Sender<BridgeResult>,
+    },
 }
 
 impl ControlCommand {
@@ -94,7 +160,18 @@ impl ControlCommand {
             | Self::SelectWorkspace { reply, .. }
             | Self::RenameWorkspace { reply, .. }
             | Self::CloseWorkspace { reply, .. }
-            | Self::SendText { reply, .. } => {
+            | Self::SendText { reply, .. }
+            | Self::ListPanes { reply, .. }
+            | Self::ListSurfaces { reply, .. }
+            | Self::CurrentSurface { reply, .. }
+            | Self::BrowserOpenSplit { reply, .. }
+            | Self::BrowserNavigate { reply, .. }
+            | Self::BrowserGetUrl { reply, .. }
+            | Self::BrowserBack { reply, .. }
+            | Self::BrowserForward { reply, .. }
+            | Self::BrowserReload { reply, .. }
+            | Self::BrowserScreenshot { reply, .. }
+            | Self::BrowserEval { reply, .. } => {
                 let _ = reply.send(result);
             }
         }
@@ -183,6 +260,23 @@ fn optional_index(params: &Map<String, Value>, key: &str) -> Result<Option<usize
     Err(BridgeError::invalid_params(format!(
         "{key} must be a non-negative integer"
     )))
+}
+
+fn required_string(
+    params: &Map<String, Value>,
+    keys: &[&str],
+    label: &str,
+) -> Result<String, BridgeError> {
+    optional_string(params, keys)
+        .ok_or_else(|| BridgeError::invalid_params(format!("{label} is required")))
+}
+
+/// Strip a leading `prefix:` (e.g. `surface:UUID` → `UUID`) so callers can pass
+/// either raw IDs or refs.
+fn normalize_handle(raw: String, prefix: &str) -> String {
+    raw.strip_prefix(prefix)
+        .map(|rest| rest.to_string())
+        .unwrap_or(raw)
 }
 
 fn parse_optional_workspace_target(
@@ -323,6 +417,145 @@ fn handle_method(
                 rx,
             )
         }
+        "pane.list" | "list-panes" | "list-panels" => {
+            let target = match parse_optional_workspace_target(params, false) {
+                Ok(target) => target,
+                Err(error) => return error_response(id, error),
+            };
+            let (reply, rx) = mpsc::channel();
+            (ControlCommand::ListPanes { target, reply }, rx)
+        }
+        "pane.surfaces" | "surface.list" => {
+            let target = match parse_optional_workspace_target(params, false) {
+                Ok(target) => target,
+                Err(error) => return error_response(id, error),
+            };
+            let pane_filter = optional_string(params, &["pane_id", "id"])
+                .map(|raw| normalize_handle(raw, "pane:"));
+            let (reply, rx) = mpsc::channel();
+            (
+                ControlCommand::ListSurfaces {
+                    target,
+                    pane_filter,
+                    reply,
+                },
+                rx,
+            )
+        }
+        "surface.current" => {
+            let target = match parse_optional_workspace_target(params, false) {
+                Ok(target) => target,
+                Err(error) => return error_response(id, error),
+            };
+            let (reply, rx) = mpsc::channel();
+            (ControlCommand::CurrentSurface { target, reply }, rx)
+        }
+        "browser.open_split" | "browser.open" | "browser.new" => {
+            let target = match parse_optional_workspace_target(params, false) {
+                Ok(target) => target,
+                Err(error) => return error_response(id, error),
+            };
+            let source_surface = optional_string(params, &["surface_id", "id"])
+                .map(|raw| normalize_handle(raw, "surface:"));
+            let url = optional_string(params, &["url"]);
+            let (reply, rx) = mpsc::channel();
+            (
+                ControlCommand::BrowserOpenSplit {
+                    target,
+                    source_surface,
+                    url,
+                    reply,
+                },
+                rx,
+            )
+        }
+        "browser.navigate" | "browser.goto" => {
+            let surface = match required_string(params, &["surface_id", "id"], "surface_id") {
+                Ok(value) => normalize_handle(value, "surface:"),
+                Err(error) => return error_response(id, error),
+            };
+            let url = match required_string(params, &["url"], "url") {
+                Ok(value) => value,
+                Err(error) => return error_response(id, error),
+            };
+            let (reply, rx) = mpsc::channel();
+            (
+                ControlCommand::BrowserNavigate {
+                    surface,
+                    url,
+                    reply,
+                },
+                rx,
+            )
+        }
+        "browser.url.get" | "browser.get.url" => {
+            let surface = match required_string(params, &["surface_id", "id"], "surface_id") {
+                Ok(value) => normalize_handle(value, "surface:"),
+                Err(error) => return error_response(id, error),
+            };
+            let (reply, rx) = mpsc::channel();
+            (ControlCommand::BrowserGetUrl { surface, reply }, rx)
+        }
+        "browser.back" => {
+            let surface = match required_string(params, &["surface_id", "id"], "surface_id") {
+                Ok(value) => normalize_handle(value, "surface:"),
+                Err(error) => return error_response(id, error),
+            };
+            let (reply, rx) = mpsc::channel();
+            (ControlCommand::BrowserBack { surface, reply }, rx)
+        }
+        "browser.forward" => {
+            let surface = match required_string(params, &["surface_id", "id"], "surface_id") {
+                Ok(value) => normalize_handle(value, "surface:"),
+                Err(error) => return error_response(id, error),
+            };
+            let (reply, rx) = mpsc::channel();
+            (ControlCommand::BrowserForward { surface, reply }, rx)
+        }
+        "browser.reload" => {
+            let surface = match required_string(params, &["surface_id", "id"], "surface_id") {
+                Ok(value) => normalize_handle(value, "surface:"),
+                Err(error) => return error_response(id, error),
+            };
+            let (reply, rx) = mpsc::channel();
+            (ControlCommand::BrowserReload { surface, reply }, rx)
+        }
+        "browser.screenshot" => {
+            let surface = match required_string(params, &["surface_id", "id"], "surface_id") {
+                Ok(value) => normalize_handle(value, "surface:"),
+                Err(error) => return error_response(id, error),
+            };
+            let out_path = optional_string(params, &["out", "path"]);
+            let (reply, rx) = mpsc::channel();
+            (
+                ControlCommand::BrowserScreenshot {
+                    surface,
+                    out_path,
+                    reply,
+                },
+                rx,
+            )
+        }
+        "browser.eval" => {
+            let surface = match required_string(params, &["surface_id", "id"], "surface_id") {
+                Ok(value) => normalize_handle(value, "surface:"),
+                Err(error) => return error_response(id, error),
+            };
+            let script = match required_string(params, &["script"], "script") {
+                Ok(value) => value,
+                Err(error) => return error_response(id, error),
+            };
+            let (reply, rx) = mpsc::channel();
+            (
+                ControlCommand::BrowserEval {
+                    surface,
+                    script,
+                    wrap_key: Some("value".to_string()),
+                    reply,
+                },
+                rx,
+            )
+        }
         _ => {
             return error_response(
                 id,
@@ -332,13 +565,24 @@ fn handle_method(
     };
 
     let (command, reply_rx) = queued;
+    let timeout = command_timeout(&command);
 
     dispatch(command);
 
-    match reply_rx.recv_timeout(Duration::from_secs(5)) {
+    match reply_rx.recv_timeout(timeout) {
         Ok(Ok(result)) => V2Response::success(id, result),
         Ok(Err(error)) => error_response(id, error),
         Err(_) => error_response(id, BridgeError::internal("control command timed out")),
+    }
+}
+
+fn command_timeout(command: &ControlCommand) -> Duration {
+    match command {
+        ControlCommand::BrowserEval { .. }
+        | ControlCommand::BrowserScreenshot { .. }
+        | ControlCommand::BrowserNavigate { .. }
+        | ControlCommand::BrowserOpenSplit { .. } => Duration::from_secs(30),
+        _ => Duration::from_secs(5),
     }
 }
 

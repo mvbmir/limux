@@ -117,10 +117,78 @@ fn surface_ref(id: &str) -> String {
     format!("surface:{id}")
 }
 
+fn pane_ref(pane_id: u32) -> String {
+    format!("pane:{pane_id}")
+}
+
 fn normalize_workspace_handle(raw: &str) -> &str {
     raw.trim()
         .strip_prefix("workspace:")
         .unwrap_or_else(|| raw.trim())
+}
+
+fn parse_pane_id_input(raw: &str) -> Option<u32> {
+    raw.trim()
+        .strip_prefix("pane:")
+        .unwrap_or_else(|| raw.trim())
+        .parse::<u32>()
+        .ok()
+}
+
+fn surface_kind_label(kind: pane::SurfaceSnapshotKind) -> &'static str {
+    match kind {
+        pane::SurfaceSnapshotKind::Terminal => "terminal",
+        pane::SurfaceSnapshotKind::Browser => "browser",
+        pane::SurfaceSnapshotKind::Keybinds => "keybinds",
+    }
+}
+
+fn encode_pane_row(workspace_id: &str, snapshot: &pane::PaneSnapshotInfo) -> serde_json::Value {
+    serde_json::json!({
+        "workspace_id": workspace_id,
+        "workspace_ref": workspace_ref(workspace_id),
+        "id": snapshot.pane_id.to_string(),
+        "ref": pane_ref(snapshot.pane_id),
+        "pane_id": snapshot.pane_id.to_string(),
+        "pane_ref": pane_ref(snapshot.pane_id),
+        "surface_count": snapshot.surface_count,
+        "active_surface_id": snapshot.active_surface_id.as_deref(),
+        "active_surface_ref": snapshot.active_surface_id.as_deref().map(surface_ref),
+    })
+}
+
+fn encode_surface_row(
+    workspace_id: &str,
+    snapshot: &pane::PaneSnapshotInfo,
+    surface: &pane::SurfaceSnapshotInfo,
+) -> serde_json::Value {
+    let active = snapshot.active_surface_id.as_deref() == Some(surface.id.as_str());
+    serde_json::json!({
+        "workspace_id": workspace_id,
+        "workspace_ref": workspace_ref(workspace_id),
+        "pane_id": snapshot.pane_id.to_string(),
+        "pane_ref": pane_ref(snapshot.pane_id),
+        "id": surface.id.as_str(),
+        "ref": surface_ref(&surface.id),
+        "surface_id": surface.id.as_str(),
+        "surface_ref": surface_ref(&surface.id),
+        "title": surface.title.as_str(),
+        "type": surface_kind_label(surface.kind),
+        "pinned": surface.pinned,
+        "selected": active,
+        "focused": active,
+    })
+}
+
+/// Walk the active workspace and collect pane snapshots with stable ordering.
+fn collect_workspace_panes(workspace: &Workspace) -> Vec<pane::PaneSnapshotInfo> {
+    let mut rows = Vec::new();
+    pane::walk_panes(&workspace.root, |pane_widget| {
+        if let Some(info) = pane::pane_snapshot_info(pane_widget) {
+            rows.push(info);
+        }
+    });
+    rows
 }
 
 fn workspace_index_for_target(state: &AppState, target: &WorkspaceTarget) -> Option<usize> {
@@ -3788,7 +3856,406 @@ fn handle_control_command(state: &State, command: ControlCommand) {
             }
             let _ = reply.send(Ok(payload));
         }
+        ControlCommand::ListPanes { target, reply } => {
+            let result = list_panes_for_target(state, &target);
+            let _ = reply.send(result);
+        }
+        ControlCommand::ListSurfaces {
+            target,
+            pane_filter,
+            reply,
+        } => {
+            let result = list_surfaces_for_target(state, &target, pane_filter.as_deref());
+            let _ = reply.send(result);
+        }
+        ControlCommand::CurrentSurface { target, reply } => {
+            let result = current_surface_for_target(state, &target);
+            let _ = reply.send(result);
+        }
+        ControlCommand::BrowserOpenSplit {
+            target,
+            source_surface,
+            url,
+            reply,
+        } => {
+            let result = browser_open_split(state, &target, source_surface.as_deref(), url);
+            let _ = reply.send(result);
+        }
+        ControlCommand::BrowserNavigate {
+            surface,
+            url,
+            reply,
+        } => {
+            let result = browser_navigate(&surface, &url);
+            let _ = reply.send(result);
+        }
+        ControlCommand::BrowserGetUrl { surface, reply } => {
+            let result = browser_get_url(&surface);
+            let _ = reply.send(result);
+        }
+        ControlCommand::BrowserBack { surface, reply } => {
+            let result = browser_history(&surface, BrowserHistoryAction::Back);
+            let _ = reply.send(result);
+        }
+        ControlCommand::BrowserForward { surface, reply } => {
+            let result = browser_history(&surface, BrowserHistoryAction::Forward);
+            let _ = reply.send(result);
+        }
+        ControlCommand::BrowserReload { surface, reply } => {
+            let result = browser_history(&surface, BrowserHistoryAction::Reload);
+            let _ = reply.send(result);
+        }
+        ControlCommand::BrowserScreenshot {
+            surface,
+            out_path,
+            reply,
+        } => {
+            browser_screenshot(&surface, out_path, reply);
+        }
+        ControlCommand::BrowserEval {
+            surface,
+            script,
+            wrap_key,
+            reply,
+        } => {
+            browser_eval(&surface, script, wrap_key, reply);
+        }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Control-socket: pane/surface/browser helpers
+// ---------------------------------------------------------------------------
+
+fn list_panes_for_target(
+    state: &State,
+    target: &WorkspaceTarget,
+) -> Result<serde_json::Value, crate::control_bridge::BridgeError> {
+    let app_state = state.borrow();
+    let Some(idx) = workspace_index_for_target(&app_state, target) else {
+        return Err(crate::control_bridge::BridgeError::not_found(
+            "workspace not found",
+        ));
+    };
+    let workspace = &app_state.workspaces[idx];
+    let workspace_id = workspace.id.clone();
+    let panes = collect_workspace_panes(workspace);
+    let rows: Vec<serde_json::Value> = panes
+        .iter()
+        .map(|snapshot| encode_pane_row(&workspace_id, snapshot))
+        .collect();
+    Ok(serde_json::json!({ "panes": rows }))
+}
+
+fn list_surfaces_for_target(
+    state: &State,
+    target: &WorkspaceTarget,
+    pane_filter: Option<&str>,
+) -> Result<serde_json::Value, crate::control_bridge::BridgeError> {
+    let app_state = state.borrow();
+    let Some(idx) = workspace_index_for_target(&app_state, target) else {
+        return Err(crate::control_bridge::BridgeError::not_found(
+            "workspace not found",
+        ));
+    };
+    let workspace = &app_state.workspaces[idx];
+    let workspace_id = workspace.id.clone();
+    let panes = collect_workspace_panes(workspace);
+    let filter_pane_id = pane_filter.and_then(parse_pane_id_input);
+
+    let mut rows = Vec::new();
+    for snapshot in &panes {
+        if let Some(pane_id) = filter_pane_id {
+            if snapshot.pane_id != pane_id {
+                continue;
+            }
+        }
+        for surface in &snapshot.surfaces {
+            rows.push(encode_surface_row(&workspace_id, snapshot, surface));
+        }
+    }
+
+    if filter_pane_id.is_some() && rows.is_empty() {
+        return Err(crate::control_bridge::BridgeError::not_found(
+            "pane not found",
+        ));
+    }
+
+    Ok(serde_json::json!({ "surfaces": rows }))
+}
+
+fn current_surface_for_target(
+    state: &State,
+    target: &WorkspaceTarget,
+) -> Result<serde_json::Value, crate::control_bridge::BridgeError> {
+    let workspace_id = {
+        let app_state = state.borrow();
+        let Some(idx) = workspace_index_for_target(&app_state, target) else {
+            return Err(crate::control_bridge::BridgeError::not_found(
+                "workspace not found",
+            ));
+        };
+        app_state.workspaces[idx].id.clone()
+    };
+
+    let pane_widget = find_focused_pane(state)
+        .map(|(_id, widget)| widget)
+        .ok_or_else(|| crate::control_bridge::BridgeError::not_found("no focused pane"))?;
+    let snapshot = pane::pane_snapshot_info(&pane_widget)
+        .ok_or_else(|| crate::control_bridge::BridgeError::internal("pane snapshot failed"))?;
+    let active = snapshot
+        .active_surface_id
+        .as_ref()
+        .and_then(|id| snapshot.surfaces.iter().find(|s| &s.id == id))
+        .ok_or_else(|| crate::control_bridge::BridgeError::not_found("no active surface"))?;
+    Ok(encode_surface_row(&workspace_id, &snapshot, active))
+}
+
+fn browser_open_split(
+    state: &State,
+    target: &WorkspaceTarget,
+    source_surface: Option<&str>,
+    url: Option<String>,
+) -> Result<serde_json::Value, crate::control_bridge::BridgeError> {
+    let workspace_id = {
+        let app_state = state.borrow();
+        let Some(idx) = workspace_index_for_target(&app_state, target) else {
+            return Err(crate::control_bridge::BridgeError::not_found(
+                "workspace not found",
+            ));
+        };
+        app_state.workspaces[idx].id.clone()
+    };
+
+    // Default: host browser in a pane OTHER than the focused (caller) pane.
+    // If another pane exists, target the first non-focused pane. Otherwise
+    // split the focused pane and host the browser in the new pane.
+    let (pane_widget, created_split) = if let Some(sid) = source_surface {
+        let widget = pane::find_pane_widget_for_surface(sid).ok_or_else(|| {
+            crate::control_bridge::BridgeError::not_found("source surface not found")
+        })?;
+        (widget, false)
+    } else {
+        let focused = find_focused_pane(state).map(|(_, widget)| widget);
+
+        let mut sibling: Option<gtk::Widget> = None;
+        {
+            let app_state = state.borrow();
+            if let Some(ws) = app_state.workspaces.iter().find(|w| w.id == workspace_id) {
+                pane::walk_panes(&ws.root, |pane_widget| {
+                    if sibling.is_some() {
+                        return;
+                    }
+                    match &focused {
+                        Some(focused_widget) if focused_widget == pane_widget => {}
+                        _ => sibling = Some(pane_widget.clone()),
+                    }
+                });
+            }
+        }
+
+        if let Some(widget) = sibling {
+            (widget, false)
+        } else {
+            // Only one pane exists (or no focused pane to distinguish) — split it.
+            let focused_widget = focused.ok_or_else(|| {
+                crate::control_bridge::BridgeError::not_found("no pane to host browser")
+            })?;
+            let new_pane = split_pane(
+                state,
+                &workspace_id,
+                &focused_widget,
+                gtk::Orientation::Horizontal,
+                SplitPaneOptions {
+                    initial_state: None,
+                    skip_default_tab: true,
+                    new_pane_first: false,
+                    persist: true,
+                },
+            );
+            (new_pane, true)
+        }
+    };
+
+    let resolved_url = url.unwrap_or_else(|| "about:blank".to_string());
+    let new_surface_id = pane::add_browser_tab_returning_id(&pane_widget, Some(&resolved_url))
+        .ok_or_else(|| {
+            crate::control_bridge::BridgeError::internal("browser tab creation failed")
+        })?;
+
+    let snapshot = pane::pane_snapshot_info(&pane_widget)
+        .ok_or_else(|| crate::control_bridge::BridgeError::internal("pane snapshot failed"))?;
+    let surface = snapshot
+        .surfaces
+        .iter()
+        .find(|s| s.id == new_surface_id)
+        .ok_or_else(|| {
+            crate::control_bridge::BridgeError::internal("new surface missing from snapshot")
+        })?;
+
+    Ok(serde_json::json!({
+        "surface_id": new_surface_id.as_str(),
+        "surface_ref": surface_ref(&new_surface_id),
+        "pane_id": snapshot.pane_id.to_string(),
+        "pane_ref": pane_ref(snapshot.pane_id),
+        "created_split": created_split,
+        "surface": encode_surface_row(&workspace_id, &snapshot, surface),
+        "browser": {
+            "open": true,
+            "url": resolved_url,
+        },
+    }))
+}
+
+fn browser_navigate(
+    surface: &str,
+    url: &str,
+) -> Result<serde_json::Value, crate::control_bridge::BridgeError> {
+    let target = pane::find_browser_target(surface).ok_or_else(|| {
+        crate::control_bridge::BridgeError::not_found("browser surface not found")
+    })?;
+    target.load_uri(url);
+    Ok(serde_json::json!({
+        "surface_id": surface,
+        "surface_ref": surface_ref(surface),
+        "url": url,
+        "ok": true,
+    }))
+}
+
+fn browser_get_url(
+    surface: &str,
+) -> Result<serde_json::Value, crate::control_bridge::BridgeError> {
+    let target = pane::find_browser_target(surface).ok_or_else(|| {
+        crate::control_bridge::BridgeError::not_found("browser surface not found")
+    })?;
+    let url = target.webview_uri();
+    Ok(serde_json::json!({
+        "surface_id": surface,
+        "surface_ref": surface_ref(surface),
+        "url": url,
+    }))
+}
+
+enum BrowserHistoryAction {
+    Back,
+    Forward,
+    Reload,
+}
+
+fn browser_history(
+    surface: &str,
+    action: BrowserHistoryAction,
+) -> Result<serde_json::Value, crate::control_bridge::BridgeError> {
+    let target = pane::find_browser_target(surface).ok_or_else(|| {
+        crate::control_bridge::BridgeError::not_found("browser surface not found")
+    })?;
+    let ok = match action {
+        BrowserHistoryAction::Back => target.go_back(),
+        BrowserHistoryAction::Forward => target.go_forward(),
+        BrowserHistoryAction::Reload => target.reload(),
+    };
+    Ok(serde_json::json!({
+        "surface_id": surface,
+        "surface_ref": surface_ref(surface),
+        "ok": ok,
+    }))
+}
+
+fn browser_screenshot(
+    surface: &str,
+    out_path: Option<String>,
+    reply: std::sync::mpsc::Sender<
+        Result<serde_json::Value, crate::control_bridge::BridgeError>,
+    >,
+) {
+    let Some(target) = pane::find_browser_target(surface) else {
+        let _ = reply.send(Err(crate::control_bridge::BridgeError::not_found(
+            "browser surface not found",
+        )));
+        return;
+    };
+    let path = out_path.map(std::path::PathBuf::from).unwrap_or_else(|| {
+        std::env::temp_dir().join(format!("limux-browser-shot-{}.png", uuid::Uuid::new_v4()))
+    });
+    let surface_owned = surface.to_string();
+    let path_clone = path.clone();
+    target.snapshot_png(
+        path,
+        Box::new(move |result| match result {
+            Ok(written) => {
+                let _ = reply.send(Ok(serde_json::json!({
+                    "surface_id": surface_owned,
+                    "surface_ref": surface_ref(&surface_owned),
+                    "path": written.to_string_lossy(),
+                    "ok": true,
+                })));
+            }
+            Err(error) => {
+                let _ = path_clone;
+                let _ = reply.send(Err(crate::control_bridge::BridgeError::internal(error)));
+            }
+        }),
+    );
+}
+
+fn browser_eval(
+    surface: &str,
+    script: String,
+    wrap_key: Option<String>,
+    reply: std::sync::mpsc::Sender<
+        Result<serde_json::Value, crate::control_bridge::BridgeError>,
+    >,
+) {
+    let Some(target) = pane::find_browser_target(surface) else {
+        let _ = reply.send(Err(crate::control_bridge::BridgeError::not_found(
+            "browser surface not found",
+        )));
+        return;
+    };
+    let surface_owned = surface.to_string();
+    target.evaluate_js(
+        script,
+        Box::new(move |result| match result {
+            Ok(raw) => {
+                let parsed: Option<serde_json::Value> = serde_json::from_str(&raw).ok();
+                let response = match (wrap_key, parsed) {
+                    (Some(key), Some(value)) => serde_json::json!({
+                        "surface_id": surface_owned,
+                        "surface_ref": surface_ref(&surface_owned),
+                        key: value,
+                    }),
+                    (Some(key), None) => serde_json::json!({
+                        "surface_id": surface_owned,
+                        "surface_ref": surface_ref(&surface_owned),
+                        key: raw,
+                    }),
+                    (None, Some(mut value)) => {
+                        if let Some(obj) = value.as_object_mut() {
+                            obj.insert(
+                                "surface_id".to_string(),
+                                serde_json::Value::String(surface_owned.clone()),
+                            );
+                            obj.insert(
+                                "surface_ref".to_string(),
+                                serde_json::Value::String(surface_ref(&surface_owned)),
+                            );
+                        }
+                        value
+                    }
+                    (None, None) => serde_json::json!({
+                        "surface_id": surface_owned,
+                        "surface_ref": surface_ref(&surface_owned),
+                        "result": raw,
+                    }),
+                };
+                let _ = reply.send(Ok(response));
+            }
+            Err(error) => {
+                let _ = reply.send(Err(crate::control_bridge::BridgeError::internal(error)));
+            }
+        }),
+    );
 }
 
 fn add_workspace_from_state(state: &State, workspace: &WorkspaceState) {

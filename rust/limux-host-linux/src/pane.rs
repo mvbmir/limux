@@ -1502,6 +1502,133 @@ pub fn tab_working_directory(pane_widget: &gtk::Widget, tab_id: &str) -> Option<
     }
 }
 
+// ---------------------------------------------------------------------------
+// Control-socket introspection helpers
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+pub struct PaneSnapshotInfo {
+    pub pane_id: u32,
+    pub surface_count: usize,
+    pub active_surface_id: Option<String>,
+    pub surfaces: Vec<SurfaceSnapshotInfo>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SurfaceSnapshotInfo {
+    pub id: String,
+    pub title: String,
+    pub kind: SurfaceSnapshotKind,
+    pub pinned: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SurfaceSnapshotKind {
+    Terminal,
+    Browser,
+    Keybinds,
+}
+
+/// Return a snapshot of the given pane for the control socket to serialize.
+pub fn pane_snapshot_info(pane_widget: &gtk::Widget) -> Option<PaneSnapshotInfo> {
+    let internals = find_pane_internals(pane_widget)?;
+    let tab_state = internals.tab_state.borrow();
+    Some(PaneSnapshotInfo {
+        pane_id: internals.pane_id,
+        surface_count: tab_state.tabs.len(),
+        active_surface_id: tab_state.active_tab.clone(),
+        surfaces: tab_state
+            .tabs
+            .iter()
+            .map(|entry| SurfaceSnapshotInfo {
+                id: entry.id.clone(),
+                title: entry.title_label.label().to_string(),
+                kind: match &entry.kind {
+                    TabKind::Terminal { .. } => SurfaceSnapshotKind::Terminal,
+                    TabKind::Browser { .. } => SurfaceSnapshotKind::Browser,
+                    TabKind::Keybinds => SurfaceSnapshotKind::Keybinds,
+                },
+                pinned: entry.pinned,
+            })
+            .collect(),
+    })
+}
+
+/// Walk every pane reachable from `root`, invoking `visit` for each.
+pub fn walk_panes(root: &gtk::Widget, mut visit: impl FnMut(&gtk::Widget)) {
+    walk_panes_inner(root, &mut visit);
+}
+
+fn walk_panes_inner(widget: &gtk::Widget, visit: &mut dyn FnMut(&gtk::Widget)) {
+    if is_pane_widget(widget) {
+        visit(widget);
+        return;
+    }
+    let mut child = widget.first_child();
+    while let Some(current) = child {
+        walk_panes_inner(&current, visit);
+        child = current.next_sibling();
+    }
+}
+
+/// Create a browser tab in `pane_widget` and return the new surface id.
+pub fn add_browser_tab_returning_id(
+    pane_widget: &gtk::Widget,
+    uri: Option<&str>,
+) -> Option<String> {
+    let internals = find_pane_internals(pane_widget)?;
+    let options = uri.map(|uri| BrowserTabOptions {
+        id: None,
+        custom_name: None,
+        pinned: false,
+        uri: Some(uri),
+    });
+    add_browser_tab_inner(&internals, options);
+    let active = internals.tab_state.borrow().active_tab.clone();
+    active
+}
+
+/// Resolve a `BrowserShortcutTarget` for the given surface id within the pane.
+pub fn browser_target_for_surface(
+    pane_widget: &gtk::Widget,
+    surface_id: &str,
+) -> Option<BrowserShortcutTarget> {
+    let internals = find_pane_internals(pane_widget)?;
+    let tab_state = internals.tab_state.borrow();
+    let entry = tab_state.tabs.iter().find(|entry| entry.id == surface_id)?;
+    match &entry.kind {
+        TabKind::Browser { state } => Some(BrowserShortcutTarget {
+            uri: state.uri.clone(),
+            handles: state.handles.clone(),
+        }),
+        _ => None,
+    }
+}
+
+/// Find the pane widget that contains the given surface id by scanning the
+/// global pane registry.
+pub fn find_pane_widget_for_surface(surface_id: &str) -> Option<gtk::Widget> {
+    PANE_REGISTRY.with(|registry| {
+        for weak in registry.borrow().values() {
+            let Some(internals) = weak.upgrade() else {
+                continue;
+            };
+            let tab_state = internals.tab_state.borrow();
+            if tab_state.tabs.iter().any(|entry| entry.id == surface_id) {
+                return Some(internals.pane_outer.clone().upcast());
+            }
+        }
+        None
+    })
+}
+
+/// Resolve a `BrowserShortcutTarget` for the given surface id anywhere in the
+/// application (scans all panes).
+pub fn find_browser_target(surface_id: &str) -> Option<BrowserShortcutTarget> {
+    let pane_widget = find_pane_widget_for_surface(surface_id)?;
+    browser_target_for_surface(&pane_widget, surface_id)
+}
+
 pub fn move_tab_to_pane(
     source_pane: &gtk::Widget,
     tab_id: &str,
@@ -2562,6 +2689,111 @@ impl BrowserShortcutTarget {
 
     pub fn is_page_editable(&self) -> bool {
         self.handles.is_page_editable()
+    }
+
+    /// Load `url` in the underlying WebView (no-op if webkit is disabled).
+    pub fn load_uri(&self, url: &str) {
+        #[cfg(feature = "webkit")]
+        {
+            self.handles.webview.load_uri(url);
+            *self.uri.borrow_mut() = Some(url.to_string());
+        }
+        #[cfg(not(feature = "webkit"))]
+        {
+            let _ = url;
+        }
+    }
+
+    /// Current URI reported by the WebView (may differ from `current_uri`
+    /// which tracks the last URL loaded/navigated-to).
+    pub fn webview_uri(&self) -> Option<String> {
+        #[cfg(feature = "webkit")]
+        {
+            self.handles
+                .webview
+                .uri()
+                .map(|gstr| gstr.to_string())
+                .or_else(|| self.uri.borrow().clone())
+        }
+        #[cfg(not(feature = "webkit"))]
+        {
+            self.uri.borrow().clone()
+        }
+    }
+
+    /// Run JavaScript in the WebView and deliver the string-form result to
+    /// `callback`. When webkit is disabled the callback is invoked immediately
+    /// with an error.
+    pub fn evaluate_js(
+        &self,
+        script: String,
+        callback: Box<dyn FnOnce(Result<String, String>) + 'static>,
+    ) {
+        #[cfg(feature = "webkit")]
+        {
+            let mut cb = Some(callback);
+            self.handles.webview.evaluate_javascript(
+                &script,
+                None,
+                None,
+                None::<&gtk::gio::Cancellable>,
+                move |result| {
+                    if let Some(cb) = cb.take() {
+                        match result {
+                            Ok(value) => cb(Ok(value.to_str().to_string())),
+                            Err(error) => cb(Err(error.to_string())),
+                        }
+                    }
+                },
+            );
+        }
+        #[cfg(not(feature = "webkit"))]
+        {
+            let _ = script;
+            callback(Err("webkit feature disabled".to_string()));
+        }
+    }
+
+    /// Capture a PNG snapshot of the WebView's visible region and write it to
+    /// `out_path`, then invoke `callback` with the result.
+    pub fn snapshot_png(
+        &self,
+        out_path: std::path::PathBuf,
+        callback: Box<dyn FnOnce(Result<std::path::PathBuf, String>) + 'static>,
+    ) {
+        #[cfg(feature = "webkit")]
+        {
+            let mut cb = Some(callback);
+            self.handles.webview.snapshot(
+                webkit6::SnapshotRegion::Visible,
+                webkit6::SnapshotOptions::empty(),
+                None::<&gtk::gio::Cancellable>,
+                move |result| {
+                    let Some(cb) = cb.take() else { return };
+                    match result {
+                        Ok(texture) => {
+                            if texture.width() == 0 || texture.height() == 0 {
+                                cb(Err("snapshot texture empty; webview not yet rendered"
+                                    .to_string()));
+                                return;
+                            }
+                            match texture.save_to_png(&out_path) {
+                                Ok(()) => cb(Ok(out_path)),
+                                Err(error) => {
+                                    cb(Err(format!("snapshot save failed: {error}")))
+                                }
+                            }
+                        }
+                        Err(error) => cb(Err(error.to_string())),
+                    }
+                },
+            );
+        }
+        #[cfg(not(feature = "webkit"))]
+        {
+            let _ = out_path;
+            callback(Err("webkit feature disabled".to_string()));
+        }
     }
 }
 
