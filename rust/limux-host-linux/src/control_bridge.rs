@@ -1029,13 +1029,6 @@ fn browser_storage_clear(kind: &str) -> String {
     )
 }
 
-/// Dump visible cookies + localStorage + sessionStorage for the current page.
-/// The caller provides `path` — the server writes the JSON bundle via
-/// std::fs::write in a follow-up step triggered by the `wrap_key` fallout.
-/// For now this returns the bundle inline; writing to disk is the caller's
-/// responsibility until we add a `ControlCommand::BrowserStateSave` variant
-/// that can touch the filesystem.
-
 /// Pulse an outline ring on the target element. Useful for visual debugging:
 /// `limux-cli browser --surface ... highlight --ref @e3 --duration 800`.
 fn browser_highlight(params: &Map<String, Value>) -> Result<String, BridgeError> {

@@ -3596,7 +3596,7 @@ fn browser_tab_new(
     //  4. Else split the caller's pane so the terminal stays visible.
     let caller_pane = find_focused_pane(state).map(|(_, w)| w);
 
-    let mut chosen: Option<gtk::Widget> = None;
+    let mut chosen: Option<gtk::Widget>;
     let mut created_split = false;
 
     if explicit_pane_id.is_some() {
