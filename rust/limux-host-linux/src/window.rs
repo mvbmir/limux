@@ -236,20 +236,6 @@ fn surface_kind_label(kind: pane::SurfaceSnapshotKind) -> &'static str {
     }
 }
 
-fn encode_pane_row(workspace_id: &str, snapshot: &pane::PaneSnapshotInfo) -> serde_json::Value {
-    serde_json::json!({
-        "workspace_id": workspace_id,
-        "workspace_ref": workspace_ref(workspace_id),
-        "id": snapshot.pane_id.to_string(),
-        "ref": pane_ref(snapshot.pane_id),
-        "pane_id": snapshot.pane_id.to_string(),
-        "pane_ref": pane_ref(snapshot.pane_id),
-        "surface_count": snapshot.surface_count,
-        "active_surface_id": snapshot.active_surface_id.as_deref(),
-        "active_surface_ref": snapshot.active_surface_id.as_deref().map(surface_ref),
-    })
-}
-
 fn encode_surface_row(
     workspace_id: &str,
     snapshot: &pane::PaneSnapshotInfo,
@@ -5442,26 +5428,6 @@ fn handle_control_command(state: &State, command: ControlCommand) {
 // Control-socket: pane/surface/browser helpers
 // ---------------------------------------------------------------------------
 
-fn list_panes_for_target(
-    state: &State,
-    target: &WorkspaceTarget,
-) -> Result<serde_json::Value, crate::control_bridge::BridgeError> {
-    let app_state = state.borrow();
-    let Some(idx) = workspace_index_for_target(&app_state, target) else {
-        return Err(crate::control_bridge::BridgeError::not_found(
-            "workspace not found",
-        ));
-    };
-    let workspace = &app_state.workspaces[idx];
-    let workspace_id = workspace.id.clone();
-    let panes = collect_workspace_panes(workspace);
-    let rows: Vec<serde_json::Value> = panes
-        .iter()
-        .map(|snapshot| encode_pane_row(&workspace_id, snapshot))
-        .collect();
-    Ok(serde_json::json!({ "panes": rows }))
-}
-
 fn list_surfaces_for_target(
     state: &State,
     target: &WorkspaceTarget,
@@ -5587,7 +5553,10 @@ fn browser_open_split(
                     new_pane_first: false,
                     persist: true,
                 },
-            );
+            )
+            .ok_or_else(|| {
+                crate::control_bridge::BridgeError::internal("failed to split pane for browser")
+            })?;
             (new_pane, true)
         }
     };
@@ -5876,7 +5845,8 @@ fn browser_tab_new(
                     new_pane_first: false,
                     persist: true,
                 },
-            );
+            )
+            .ok_or_else(|| crate::control_bridge::BridgeError::not_found("no pane to host tab"))?;
             chosen = Some(new_pane);
             created_split = true;
         }

@@ -1927,7 +1927,6 @@ pub fn terminal_handle_for_root(
 #[derive(Debug, Clone)]
 pub struct PaneSnapshotInfo {
     pub pane_id: u32,
-    pub surface_count: usize,
     pub active_surface_id: Option<String>,
     pub surfaces: Vec<SurfaceSnapshotInfo>,
 }
@@ -1953,7 +1952,6 @@ pub fn pane_snapshot_info(pane_widget: &gtk::Widget) -> Option<PaneSnapshotInfo>
     let tab_state = internals.tab_state.borrow();
     Some(PaneSnapshotInfo {
         pane_id: internals.pane_id,
-        surface_count: tab_state.tabs.len(),
         active_surface_id: tab_state.active_tab.clone(),
         surfaces: tab_state
             .tabs
