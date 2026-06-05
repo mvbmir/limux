@@ -1512,6 +1512,42 @@ pub fn create_terminal(
         let key_controller = gtk::EventControllerKey::new();
         key_controller.connect_key_pressed(move |ctrl, keyval, keycode, modifier| {
             if let Some(surface) = *sc_press.borrow() {
+                // Ctrl+V with an image on the clipboard: write it to a temp PNG
+                // and paste the file path instead of letting Ghostty paste raw
+                // (which a TUI can't consume). Falls through to normal paste when
+                // the clipboard has no image.
+                let is_paste = modifier.contains(gtk::gdk::ModifierType::CONTROL_MASK)
+                    && (keyval == gtk::gdk::Key::v || keyval == gtk::gdk::Key::V);
+                if is_paste {
+                    if let Some(widget) = ctrl.widget() {
+                        let clipboard = widget.display().clipboard();
+                        let mimes = clipboard.formats().mime_types();
+                        if clipboard_formats_include_image(mimes.iter().map(|m| m.as_str())) {
+                            let sc = sc_press.clone();
+                            clipboard.read_texture_async(
+                                gtk::gio::Cancellable::NONE,
+                                move |result| {
+                                    let Ok(Some(texture)) = result else {
+                                        return;
+                                    };
+                                    if let Some(surface) = *sc.borrow() {
+                                        if let Some(text) = pasted_image_text(&texture) {
+                                            unsafe {
+                                                ghostty_surface_text(
+                                                    surface,
+                                                    text.as_ptr(),
+                                                    text.as_bytes().len(),
+                                                );
+                                            }
+                                        }
+                                    }
+                                },
+                            );
+                            return glib::Propagation::Stop;
+                        }
+                    }
+                }
+
                 let current_event = ctrl
                     .current_event()
                     .and_then(|event| event.downcast::<gtk::gdk::KeyEvent>().ok());
@@ -1774,6 +1810,31 @@ pub fn create_terminal(
             true
         });
         gl_area.add_controller(drop_target);
+    }
+
+    // Image drop: accept an image dragged from a browser/file manager (raw
+    // texture, not a file path), write it to a temp PNG, and paste the path —
+    // same drop-to-file approach as the Ctrl+V image-paste handler.
+    {
+        let surface_cell = surface_cell.clone();
+        let image_drop =
+            gtk::DropTarget::new(gtk::gdk::Texture::static_type(), gtk::gdk::DragAction::COPY);
+        image_drop.connect_drop(move |_target, value, _x, _y| {
+            let Some(surface) = *surface_cell.borrow() else {
+                return false;
+            };
+            let Ok(texture) = value.get::<gtk::gdk::Texture>() else {
+                return false;
+            };
+            let Some(text) = pasted_image_text(&texture) else {
+                return false;
+            };
+            unsafe {
+                ghostty_surface_text(surface, text.as_ptr(), text.as_bytes().len());
+            }
+            true
+        });
+        gl_area.add_controller(image_drop);
     }
 
     // On unrealize: deinit GL resources but keep the surface alive.
@@ -2229,6 +2290,19 @@ fn dropped_file_text(file_list: &gtk::gdk::FileList) -> Option<CString> {
             .filter_map(|file| file.path())
             .map(|path| path.into_os_string().into_vec()),
     )
+}
+
+/// Save a dropped or pasted image to a temp PNG and return the shell-escaped
+/// path to inject into the terminal. Image bytes can't ride a PTY and a TUI
+/// (e.g. an agent CLI) can't receive them, so — like cmux's drop-to-file — we
+/// write a real file and paste its path; the agent's file-read tool opens it.
+fn pasted_image_text(texture: &gtk::gdk::Texture) -> Option<CString> {
+    let path = std::env::temp_dir().join(format!("limux-drop-{}.png", uuid::Uuid::new_v4()));
+    if let Err(error) = texture.save_to_png(&path) {
+        eprintln!("limux: failed to write dropped image: {error}");
+        return None;
+    }
+    shell_escape_joined_bytes(std::iter::once(path.into_os_string().into_vec()))
 }
 
 /// Bash-escape a path so it can be safely pasted into the terminal without
