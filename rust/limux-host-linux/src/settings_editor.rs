@@ -215,6 +215,19 @@ fn build_general_page(input: &SettingsEditorInput) -> gtk::Widget {
     controls_row.set_activatable_widget(Some(&controls_dropdown));
     group.add(&controls_row);
 
+    let scrollbar_row = adw::ActionRow::builder()
+        .title("Terminal scrollbar")
+        .subtitle("Show a slim scrollbar on terminal surfaces when there is scrollback to scroll")
+        .build();
+    scrollbar_row.set_title_lines(1);
+    scrollbar_row.set_subtitle_lines(2);
+    let scrollbar_switch = gtk::Switch::new();
+    scrollbar_switch.set_active(input.config.borrow().interface.show_terminal_scrollbar);
+    scrollbar_switch.set_valign(gtk::Align::Center);
+    scrollbar_row.add_suffix(&scrollbar_switch);
+    scrollbar_row.set_activatable_widget(Some(&scrollbar_switch));
+    group.add(&scrollbar_row);
+
     page.add(&group);
 
     {
@@ -285,6 +298,16 @@ fn build_general_page(input: &SettingsEditorInput) -> gtk::Widget {
             };
             apply_config_change(&config, &*on_changed, move |c| {
                 c.interface.window_controls_side = side;
+            });
+        });
+    }
+    {
+        let config = input.config.clone();
+        let on_changed = input.on_config_changed.clone();
+        scrollbar_switch.connect_active_notify(move |switch| {
+            let show_terminal_scrollbar = switch.is_active();
+            apply_config_change(&config, &*on_changed, move |c| {
+                c.interface.show_terminal_scrollbar = show_terminal_scrollbar;
             });
         });
     }

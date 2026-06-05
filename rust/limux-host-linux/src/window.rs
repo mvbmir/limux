@@ -1945,6 +1945,16 @@ pub fn build_window(app: &adw::Application) {
     // pane leading slot) based on the loaded config.
     apply_top_bar_mode(&state);
 
+    // Apply the saved terminal-scrollbar preference to any surfaces already live.
+    crate::terminal::set_scrollbar_enabled(
+        state
+            .borrow()
+            .config
+            .borrow()
+            .interface
+            .show_terminal_scrollbar,
+    );
+
     register_app_actions(app, &state);
     register_window_actions(&window, &state);
     install_key_capture(&window, &state);
@@ -2660,10 +2670,14 @@ fn handle_config_change(
     {
         apply_top_bar_mode(state);
     }
+    if previous.interface.show_terminal_scrollbar != updated.interface.show_terminal_scrollbar {
+        crate::terminal::set_scrollbar_enabled(updated.interface.show_terminal_scrollbar);
+    }
     if let Err(err) = app_config::save(updated) {
         state.borrow().config.borrow_mut().clone_from(previous);
         apply_appearance(&style_manager, system_prefers_dark, &previous.appearance);
         apply_top_bar_mode(state);
+        crate::terminal::set_scrollbar_enabled(previous.interface.show_terminal_scrollbar);
 
         let detail = format!("Failed to save Limux settings: {err}");
         eprintln!("limux: {detail}");

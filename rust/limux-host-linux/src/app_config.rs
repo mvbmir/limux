@@ -85,6 +85,7 @@ pub struct InterfaceConfig {
     pub window_controls_side: WindowControlsSide,
     pub show_top_bar: bool,
     pub show_workspace_indicators: bool,
+    pub show_terminal_scrollbar: bool,
 }
 
 impl Default for InterfaceConfig {
@@ -93,6 +94,7 @@ impl Default for InterfaceConfig {
             window_controls_side: WindowControlsSide::default(),
             show_top_bar: true,
             show_workspace_indicators: true,
+            show_terminal_scrollbar: false,
         }
     }
 }
@@ -317,6 +319,11 @@ fn parse_app_config_value(root: &Value) -> AppConfig {
         .and_then(Value::as_bool)
         .unwrap_or(true);
 
+    let show_terminal_scrollbar = interface_obj
+        .and_then(|interface| interface.get("show_terminal_scrollbar"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+
     AppConfig {
         focus: FocusConfig {
             hover_terminal_focus,
@@ -333,6 +340,7 @@ fn parse_app_config_value(root: &Value) -> AppConfig {
             window_controls_side,
             show_top_bar,
             show_workspace_indicators,
+            show_terminal_scrollbar,
         },
         font_size,
     }
@@ -374,6 +382,7 @@ fn save_to_path(path: &Path, config: &AppConfig) -> Result<(), String> {
             "window_controls_side": config.interface.window_controls_side.as_str(),
             "show_top_bar": config.interface.show_top_bar,
             "show_workspace_indicators": config.interface.show_workspace_indicators,
+            "show_terminal_scrollbar": config.interface.show_terminal_scrollbar,
         }),
     );
 

@@ -33,7 +33,9 @@ unsafe impl Sync for GhosttyState {}
 
 static GHOSTTY: OnceLock<GhosttyState> = OnceLock::new();
 static CURRENT_COLOR_SCHEME: AtomicI32 = AtomicI32::new(GHOSTTY_COLOR_SCHEME_LIGHT);
-static CURRENT_SCROLLBAR_ENABLED: AtomicBool = AtomicBool::new(true);
+// Off by default; driven by the `interface.show_terminal_scrollbar` app setting
+// via `set_scrollbar_enabled`, not by ghostty config.
+static CURRENT_SCROLLBAR_ENABLED: AtomicBool = AtomicBool::new(false);
 static WAKEUP_IDLE_QUEUED: AtomicBool = AtomicBool::new(false);
 static EMPTY_CLIPBOARD_TEXT: [u8; 1] = [0];
 
@@ -517,7 +519,6 @@ pub fn init_ghostty() {
 
         let config = load_ghostty_config();
         let background_opacity = load_background_opacity(config);
-        CURRENT_SCROLLBAR_ENABLED.store(load_scrollbar_enabled(config), Ordering::Relaxed);
 
         let runtime_config = ghostty_runtime_config_s {
             userdata: ptr::null_mut(),
@@ -581,19 +582,42 @@ fn load_background_opacity(config: ghostty_config_t) -> f64 {
     }
 }
 
-fn load_scrollbar_enabled(config: ghostty_config_t) -> bool {
-    let mut value: *const c_char = ptr::null();
-    let key = b"scrollbar";
-    let loaded = unsafe {
-        ghostty_config_get(
-            config,
-            (&mut value as *mut *const c_char).cast::<c_void>(),
-            key.as_ptr().cast::<c_char>(),
-            key.len(),
-        )
-    };
+/// Enable or disable the terminal scrollbar across all live surfaces. Driven by
+/// the `interface.show_terminal_scrollbar` app setting. When disabled, every
+/// surface's scrollbar is hidden; when enabled, each is shown only if its
+/// content actually overflows the viewport.
+pub fn set_scrollbar_enabled(enabled: bool) {
+    CURRENT_SCROLLBAR_ENABLED.store(enabled, Ordering::Relaxed);
+    SURFACE_MAP.with(|map| {
+        for entry in map.borrow().values() {
+            let has_overflow =
+                entry.scrollbar_adjustment.upper() > entry.scrollbar_adjustment.page_size();
+            entry.scrollbar.set_visible(enabled && has_overflow);
+        }
+    });
+}
 
-    !loaded || value.is_null() || unsafe { std::ffi::CStr::from_ptr(value) }.to_bytes() != b"never"
+/// Install the slim styling for the terminal scrollbar once per display. The
+/// default GtkScrollbar is a wide, opaque bar; this narrows the slider and makes
+/// the trough transparent so it reads as a thin overlay indicator.
+fn install_terminal_scrollbar_css() {
+    static CSS_ONCE: std::sync::Once = std::sync::Once::new();
+    CSS_ONCE.call_once(|| {
+        let Some(display) = gtk::gdk::Display::default() else {
+            return;
+        };
+        let provider = gtk::CssProvider::new();
+        provider.load_from_data(
+            "scrollbar.limux-terminal-scrollbar { background: transparent; border: none; min-width: 9px; } \
+             scrollbar.limux-terminal-scrollbar slider { min-width: 5px; border-radius: 6px; margin: 2px; background: rgba(255, 255, 255, 0.28); } \
+             scrollbar.limux-terminal-scrollbar slider:hover { background: rgba(255, 255, 255, 0.45); }",
+        );
+        gtk::style_context_add_provider_for_display(
+            &display,
+            &provider,
+            gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+        );
+    });
 }
 
 fn ghostty_color_scheme_for_dark_mode(dark: bool) -> c_int {
@@ -821,7 +845,6 @@ unsafe extern "C" fn ghostty_action_cb(
         }
         GHOSTTY_ACTION_RELOAD_CONFIG => {
             let config = load_ghostty_config();
-            CURRENT_SCROLLBAR_ENABLED.store(load_scrollbar_enabled(config), Ordering::Relaxed);
             match target.tag {
                 GHOSTTY_TARGET_APP => unsafe {
                     ghostty_app_update_config(app, config);
@@ -1157,6 +1180,8 @@ pub fn create_terminal(
     let scrollbar = gtk::Scrollbar::new(gtk::Orientation::Vertical, Some(&scrollbar_adjustment));
     scrollbar.set_visible(false);
     scrollbar.set_vexpand(true);
+    scrollbar.add_css_class("limux-terminal-scrollbar");
+    install_terminal_scrollbar_css();
 
     let root = gtk::Box::new(gtk::Orientation::Horizontal, 0);
     root.set_hexpand(true);
