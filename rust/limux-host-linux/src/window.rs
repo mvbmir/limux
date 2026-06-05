@@ -2174,6 +2174,38 @@ fn install_sidebar_resize(
     }
 
     main_split.add_controller(drag);
+
+    // Clamp the sidebar to the available width. The sidebar is a fixed
+    // width-request box (not a GtkPaned), and GtkBox never shrinks a
+    // width-request child on its own — so a width saved on a large monitor
+    // would overflow and push the terminal area off-screen after the window
+    // moves to a smaller display. Re-fit per frame once the layout has settled
+    // (no active drag, no open/close animation). The saved expanded width is
+    // left untouched, so the sidebar grows back when space returns.
+    {
+        let state = state.clone();
+        let sidebar = sidebar.clone();
+        let sidebar_shell = sidebar_shell.clone();
+        let resizing_sidebar = resizing_sidebar.clone();
+        main_split.add_tick_callback(move |main_split, _| {
+            if resizing_sidebar.get() || !sidebar_shell.is_visible() {
+                return glib::ControlFlow::Continue;
+            }
+            let available = main_split.width();
+            if available <= 0 || state.borrow().sidebar_animation.is_some() {
+                return glib::ControlFlow::Continue;
+            }
+            let min_width = sidebar_min_width(&sidebar);
+            let reserve = SIDEBAR_RESIZE_HANDLE_WIDTH_PX + pane::MIN_PANE_WIDTH;
+            let max_fit = (available - reserve).max(min_width);
+            let desired = state.borrow().sidebar_expanded_width.max(min_width);
+            let effective = desired.min(max_fit);
+            if sidebar_width(&sidebar_shell) != effective {
+                set_sidebar_width(&sidebar_shell, effective);
+            }
+            glib::ControlFlow::Continue
+        });
+    }
 }
 
 fn set_sidebar_width(sidebar_shell: &gtk::Box, width: i32) {
