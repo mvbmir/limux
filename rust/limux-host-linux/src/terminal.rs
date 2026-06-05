@@ -415,11 +415,17 @@ fn request_terminal_focus(gl_area: &gtk::GLArea, had_focus: &Cell<bool>) {
 }
 
 fn refresh_surface_display(surface: ghostty_surface_t, gl_area: &gtk::GLArea) {
+    // Ghostty sizes its grid + GL viewport in PHYSICAL pixels. `allocation()`
+    // is in logical (scale-independent) pixels, so multiply by the scale factor
+    // to get the framebuffer's real pixel size. Using the logical size directly
+    // under-sizes the surface on HiDPI monitors (scale_factor > 1), which makes
+    // ghostty render oversized cells and wrap text at ~1 column.
+    let scale = gl_area.scale_factor();
     let alloc = gl_area.allocation();
-    let w = alloc.width() as u32;
-    let h = alloc.height() as u32;
+    let w = (alloc.width().max(0) * scale) as u32;
+    let h = (alloc.height().max(0) * scale) as u32;
     if w > 0 && h > 0 {
-        let scale = gl_area.scale_factor() as f64;
+        let scale = scale as f64;
         unsafe {
             ghostty_surface_set_content_scale(surface, scale, scale);
             ghostty_surface_set_size(surface, w, h);
