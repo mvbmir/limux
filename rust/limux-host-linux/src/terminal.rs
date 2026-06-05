@@ -1570,6 +1570,20 @@ pub fn create_terminal(
         });
     }
 
+    // Moving the window to a monitor with a different scale factor changes the
+    // GLArea's scale without necessarily changing its allocation, so
+    // connect_resize never fires and Ghostty keeps rendering at the old
+    // content scale (text ends up the wrong size). Push the new scale through
+    // explicitly whenever scale-factor changes.
+    {
+        let surface_cell = surface_cell.clone();
+        gl_area.connect_scale_factor_notify(move |gl_area| {
+            if let Some(surface) = *surface_cell.borrow() {
+                refresh_surface_display(surface, gl_area);
+            }
+        });
+    }
+
     // Keyboard input
     //
     // Send key events with the text field populated. Ghostty uses the
